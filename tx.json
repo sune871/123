@@ -1,0 +1,116 @@
+{
+  "blockTime": 1721209642,
+  "meta": {
+    "err": null,
+    "fee": 5000,
+    "innerInstructions": [
+      {
+        "index": 0,
+        "instructions": [
+          {
+            "parsed": {
+              "info": {
+                "lamports": 10000000,
+                "newAccount": "2Rw7tWn1HvF4DZwAiUbqcL2s1GPcN19gDt2pHbAv43SS",
+                "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                "source": "3xAe7EXUs1obfDfhGbxu41QEGRews2PJsTASmqFEerhW"
+              },
+              "type": "createAccount"
+            },
+            "program": "system",
+            "programId": "11111111111111111111111111111111"
+          },
+          {
+            "parsed": {
+              "info": {
+                "account": "2Rw7tWn1HvF4DZwAiUbqcL2s1GPcN19gDt2pHbAv43SS"
+              },
+              "type": "initializeAccount"
+            },
+            "program": "spl-token",
+            "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+          }
+        ]
+      }
+    ],
+    "logMessages": [
+      "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+      "Program ComputeBudget111111111111111111111111111111 success",
+      "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+      "Program ComputeBudget111111111111111111111111111111 success",
+      "Program CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C invoke [1]",
+      "Program log: Instruction: SwapBaseInput",
+      "Program log: AnchorError caused by account: observation_state. Error Code: AccountOwnedByWrongProgram. Error Number: 3007. Error Message: The given account is owned by a different program than expected.",
+      "Program log: Left:",
+      "Program log: 11111111111111111111111111111111",
+      "Program log: Right:",
+      "Program log: CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
+      "Program CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C consumed 13912 of 299700 compute units",
+      "Program CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C failed: custom program error: 0xbbf"
+    ],
+    "postBalances": [
+      899999995000, 2039280, 30483752, 2039280, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1
+    ],
+    "postTokenBalances": [
+      {
+        "accountIndex": 1,
+        "mint": "4AXnbEf3N3iLNChHL2TWHcyMnBKEvJLJ82okFFUFbonk",
+        "owner": "3xAe7EXUs1obfDfhGbxu41QEGRews2PJsTASmqFEerhW",
+        "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        "uiTokenAmount": {
+          "amount": "0",
+          "decimals": 9,
+          "uiAmount": 0,
+          "uiAmountString": "0"
+        }
+      }
+    ],
+    "preBalances": [
+      900000005000, 0, 30483752, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1
+    ],
+    "preTokenBalances": [
+      {
+        "accountIndex": 1,
+        "mint": "4AXnbEf3N3iLNChHL2TWHcyMnBKEvJLJ82okFFUFbonk",
+        "owner": "3xAe7EXUs1obfDfhGbxu41QEGRews2PJsTASmqFEerhW",
+        "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        "uiTokenAmount": {
+          "amount": "0",
+          "decimals": 9,
+          "uiAmount": 0,
+          "uiAmountString": "0"
+        }
+      }
+    ],
+    "rewards": [],
+    "status": {
+      "Ok": null
+    }
+  },
+  "slot": 322222222,
+  "transaction": {
+    "message": {
+      "accountKeys": [
+        "3xAe7EXUs1obfDfhGbxu41QEGRews2PJsTASmqFEerhW",
+        "2Rw7tWn1HvF4DZwAiUbqcL2s1GPcN19gDt2pHbAv43SS",
+        "HuLyziS8J8Kbdww5bEvMKfxFBMbFWAucyAKDQRwnyZ9o",
+        "GHq3zKabrM5k8tuEDz92hF5ZYMsszigytY6oUFhMYM2N",
+        "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL",
+        "D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2",
+        "3pGCmuKvHZ5BDTNGwTfvrQT8AGcExakrZWGaBwx2zH6J",
+        "5L7ngZB7t3ZxqP8wU8yqAaX2aCw3y5aoer8pFrTMrU6U",
+        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        "So11111111111111111111111111111111111111112",
+        "4AXnbEf3N3iLNChHL2TWHcyMnBKEvJLJ82okFFUFbonk",
+        "DGHUt48KE78f6XiW7zPi4pFhG2BaXb2SjZc7geQwHPkV"
+      ],
+      "header": {
+        "numReadonlySignedAccounts": 0,
+        "numReadonlyUnsignedAccounts": 6,
+        "numRequiredSignatures": 1
+      },
+      "instructions": [
+        {
+          "accounts": [0, 1],
+          "data": 
