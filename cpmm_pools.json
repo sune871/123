@@ -1,0 +1,14 @@
+[
+  {
+    "pool_state": "GHq3zKabrM5k8tuEDz92hF5ZYMsszigytY6oUFhMYM2N",
+    "input_mint": "So11111111111111111111111111111111111111112",
+    "output_mint": "4AXnbEf3N3iLNChHL2TWHcyMnBKEvJLJ82okFFUFbonk",
+    "input_vault": "3pGCmuKvHZ5BDTNGwTfvrQT8AGcExakrZWGaBwx2zH6J",
+    "output_vault": "5L7ngZB7t3ZxqP8wU8yqAaX2aCw3y5aoer8pFrTMrU6U",
+    "amm_config": "D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2",
+    "authority": "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL",
+    "observation_state": "DGHiUT48KE78GfxVWzPi4pFhG2BaXb2SjZc7geQvHPkV",
+    "input_token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "output_token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  }
+] 
