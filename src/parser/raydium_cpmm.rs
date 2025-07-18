@@ -22,6 +22,11 @@ pub fn parse_raydium_cpmm_swap(
     post_token_balances: &[serde_json::Value],
     logs: &[String],
 ) -> Result<Option<TradeDetails>> {
+    // 打印所有账户以便调试
+    info!("CPMM交易账户列表：");
+    for (i, key) in account_keys.iter().enumerate() {
+        info!("  [{}] {}", i, key);
+    }
     // 检查指令数据长度
     if instruction_data.len() < 8 {
         return Ok(None);
@@ -41,29 +46,32 @@ pub fn parse_raydium_cpmm_swap(
     info!("检测到Raydium CPMM {} 指令", swap_type);
     
     // 解析日志获取交易详情
-    let swap_info = parse_swap_info_from_logs(logs)?;
+    let _swap_info = parse_swap_info_from_logs(logs)?;
     
     // 创建RPC客户端和缓存实例
     let rpc = RpcClient::new("https://solana-rpc.publicnode.com/f884f7c2cfa0e7ecbf30e7da70ec1da91bda3c9d04058269397a5591e7fd013e".to_string());
     let pool_cache = PoolCache::new(300);
-    // 从文件加载现有池子
-    if let Err(e) = pool_cache.load_from_file() {
-        warn!("加载池子文件失败: {}", e);
-    }
+    // 尝试加载现有池子（忽略错误）
+    let _ = pool_cache.load_from_file();
     // 获取所有已知池子地址
     let known_pools = pool_cache.get_all_pool_states();
-    // 查找池子账户并获取池子信息
-    let pool_account_index = match find_pool_account_index(account_keys, &known_pools) {
-        Some(idx) => idx,
-        None => {
-            warn!("未能在account_keys中精准匹配到池子地址，跳过解析");
-            return Ok(None);
-        }
-    };
+    // 查找池子账户
+    let pool_account_index = 3; // CPMM swap指令实际池子地址索引
+    if account_keys.len() <= pool_account_index {
+        warn!("CPMM指令账户数量不足，无法获取池子地址");
+        return Ok(None);
+    }
     let pool_address = &account_keys[pool_account_index];
-    
+    let pool_pubkey = Pubkey::from_str(pool_address)?;
+    // 动态添加新池子到缓存
+    if !known_pools.contains(&pool_pubkey) {
+        info!("发现新池子，动态添加到缓存: {}", pool_pubkey);
+        if let Err(e) = pool_cache.add_pool_dynamically(&rpc, &pool_pubkey) {
+            warn!("动态添加池子失败: {}", e);
+        }
+    }
     // 获取池子参数（如果不存在会自动从链上加载）
-    let pool_param = match pool_cache.get_pool_params(&rpc, &Pubkey::from_str(pool_address)?) {
+    let pool_param = match pool_cache.get_pool_params(&rpc, &pool_pubkey) {
         Ok(params) => params,
         Err(e) => {
             warn!("获取池子参数失败: {}", e);
@@ -91,13 +99,11 @@ pub fn parse_raydium_cpmm_swap(
     // 获取用户钱包地址
     let user_wallet = Pubkey::from_str(&account_keys[0])
         .context("无法解析用户钱包地址")?;
-    
+    info!("[DEBUG] CPMM解析结果 trade.wallet = {}", user_wallet);
     // 计算gas费用
     let gas_fee = calculate_gas_fee(pre_balances, post_balances)?;
-    
     // 获取程序ID
     let program_id = Pubkey::from_str("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")?;
-    
     let trade_details = TradeDetails {
         signature: signature.to_string(),
         wallet: user_wallet,
@@ -108,12 +114,12 @@ pub fn parse_raydium_cpmm_swap(
         amount_in: actual_amount_in,
         amount_out: actual_amount_out,
         price,
-        pool_address: Pubkey::from_str(pool_address)?,
+        pool_address: pool_pubkey,
         timestamp: Utc::now().timestamp(),
         gas_fee,
         program_id: program_id,
     };
-    
+    info!("[DEBUG] CPMM TradeDetails: {:?}", trade_details);
     Ok(Some(trade_details))
 }
 
@@ -181,7 +187,8 @@ fn extract_number_from_log(log: &str, key: &str) -> Option<u64> {
 }
 
 /// 查找池子账户索引
-fn find_pool_account_index(account_keys: &[String], known_pools: &HashSet<Pubkey>) -> Option<usize> {
+fn find_pool_account_index(account_keys: &[String], known_pools: &HashSet<Pubkey>, rpc: &RpcClient) -> Option<usize> {
+    // 首先尝试在已知池子中查找
     for (i, key) in account_keys.iter().enumerate() {
         if let Ok(pk) = Pubkey::from_str(key) {
             if known_pools.contains(&pk) {
@@ -190,7 +197,32 @@ fn find_pool_account_index(account_keys: &[String], known_pools: &HashSet<Pubkey
             }
         }
     }
-    tracing::warn!("[CPMM池子精准匹配] 未在account_keys中找到已知池子地址");
+    // 如果没找到，尝试通过程序ID识别池子地址
+    let cpmm_program_id = Pubkey::from_str(crate::types::RAYDIUM_CPMM).ok()?;
+    for (i, key) in account_keys.iter().enumerate() {
+        if key == "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL" ||
+           key == "D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2" ||
+           key == "11111111111111111111111111111111" ||
+           key == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" ||
+           key == crate::types::RAYDIUM_CPMM {
+            continue;
+        }
+        if let Ok(pk) = Pubkey::from_str(key) {
+            // 检查owner
+            if let Ok(acc) = rpc.get_account(&pk) {
+                if acc.owner == cpmm_program_id {
+                    tracing::info!("[CPMM池子推测] 账户{} 索引:{} owner匹配CPMM程序", pk, i);
+                    return Some(i);
+                }
+            }
+            // 一般来说，池子地址会在索引2-5之间
+            if i >= 2 && i <= 5 {
+                tracing::info!("[CPMM池子推测] 使用索引{}作为池子地址: {}", i, pk);
+                return Some(i);
+            }
+        }
+    }
+    tracing::warn!("[CPMM池子查找] 未找到合适的池子地址");
     None
 }
 

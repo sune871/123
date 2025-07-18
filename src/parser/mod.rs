@@ -89,6 +89,31 @@ impl TransactionParser {
         }
     }
     
+    /// 新增：只用指令账户解析Raydium CPMM
+    pub fn parse_transaction_data_with_instruction_accounts(
+        &self,
+        signature: &str,
+        instruction_accounts: &[String],
+        instruction_data: &[u8],
+        pre_balances: &[u64],
+        post_balances: &[u64],
+        pre_token_balances: &[serde_json::Value],
+        post_token_balances: &[serde_json::Value],
+        logs: &[String],
+    ) -> Result<Option<TradeDetails>> {
+        tracing::info!("使用CPMM专用解析器，账户数量: {}", instruction_accounts.len());
+        raydium_cpmm::parse_raydium_cpmm_swap(
+            signature,
+            instruction_accounts,
+            instruction_data,
+            pre_balances,
+            post_balances,
+            pre_token_balances,
+            post_token_balances,
+            logs,
+        )
+    }
+    
     /// 从账户列表中识别DEX类型
     fn identify_dex_from_accounts(&self, account_keys: &[String]) -> Result<DexType> {
         // 新增：支持指令级别的program_id判断

@@ -292,6 +292,67 @@ impl GrpcMonitor {
                             })
                             .collect();
                         let parser = TransactionParser::new();
+                        // 新增：只针对Raydium CPMM指令，传递指令账户并调用新方法
+                        if program_id == crate::types::RAYDIUM_CPMM {
+                            let instruction_accounts: Vec<String> = instruction.accounts.iter()
+                                .filter_map(|&idx| account_keys.get(idx as usize).cloned())
+                                .collect();
+                            let trade_result = parser.parse_transaction_data_with_instruction_accounts(
+                                &signature,
+                                &instruction_accounts,
+                                &instruction.data,
+                                &meta.pre_balances,
+                                &meta.post_balances,
+                                &pre_token_balances,
+                                &post_token_balances,
+                                &meta.log_messages,
+                            );
+                            // 替换原有is_signer和is_writable推断逻辑
+                            let mut chain_is_signer = Vec::new();
+                            let mut chain_is_writable = Vec::new();
+                            if let Some(msg) = &transaction.message {
+                                if let Some(header) = &msg.header {
+                                    let total_keys = msg.account_keys.len();
+                                    chain_is_signer = vec![false; total_keys];
+                                    chain_is_writable = vec![false; total_keys];
+                                    // 前 num_required_signatures 个是 signer
+                                    for i in 0..header.num_required_signatures as usize {
+                                        chain_is_signer[i] = true;
+                                    }
+                                    // 前 (num_required_signatures - num_readonly_signed_accounts) 个 signer 是 writable
+                                    for i in 0..(header.num_required_signatures - header.num_readonly_signed_accounts) as usize {
+                                        chain_is_writable[i] = true;
+                                    }
+                                    // 非 signer 部分
+                                    let mut i = header.num_required_signatures as usize;
+                                    // 非 signer 里，前 (total_keys - i - num_readonly_unsigned_accounts) 个是 writable
+                                    for j in 0..(total_keys - i - header.num_readonly_unsigned_accounts as usize) {
+                                        chain_is_writable[i + j] = true;
+                                    }
+                                    // 其余都是 readonly
+                                }
+                            }
+                            match trade_result {
+                                Ok(Some(trade_details)) => {
+                                    // 传递链上账户顺序和权限到handle_parsed_trade
+                                    self.handle_parsed_trade_with_chain_meta(
+                                        trade_details,
+                                        instruction_accounts.clone(),
+                                        chain_is_signer.clone(),
+                                        chain_is_writable.clone(),
+                                        instruction.data.clone(),
+                                        Pubkey::from_str(program_id).unwrap()
+                                    );
+                                    found_dex_trade = true;
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    warn!("解析交易失败: {}", e);
+                                }
+                            }
+                            continue;
+                        }
+                        // 其它DEX类型保持原有逻辑
                         let trade_result = parser.parse_transaction_data(
                             &signature,
                             &account_keys,
@@ -755,25 +816,19 @@ impl GrpcMonitor {
                 match trade.dex_type {
                     crate::types::DexType::RaydiumCPMM => {
                         // 使用PoolCache动态获取池子参数
-                        if account_keys.len() >= 16 {
+                        if account_keys.len() > 3 {
                             info!("[DEBUG] Raydium CPMM分支，account_keys数量: {}", account_keys.len());
-                            
                             let pool_state = Pubkey::from_str(&account_keys[3]).unwrap();
                             let rpc_url = executor.rpc_url.clone();
                             let trade_clone = trade.clone();
                             let executor = Arc::clone(&executor);
                             let wallet = executor.copy_wallet.clone();
-                            
                             tokio::spawn(async move {
                                 let client = solana_client::rpc_client::RpcClient::new(rpc_url);
                                 let pool_cache = crate::pool_cache::PoolCache::new(300);
-                                
-                                // 从文件加载现有池子
                                 if let Err(e) = pool_cache.load_from_file() {
                                     warn!("加载池子文件失败: {}", e);
                                 }
-                                
-                                // 动态获取池子参数
                                 let cpmm_accounts = match pool_cache.build_swap_accounts(
                                     &client,
                                     &pool_state,
@@ -787,7 +842,6 @@ impl GrpcMonitor {
                                         return;
                                     }
                                 };
-                                
                                 info!("[DEBUG] tokio::spawn内，先同步创建ATA");
                                 if let Err(e) = TradeExecutor::ensure_ata_exists_static(&client, &wallet, &wallet.pubkey(), &trade_clone.token_in.mint) {
                                     warn!("[ATA] 创建token_in ATA失败: {}", e);
@@ -797,8 +851,6 @@ impl GrpcMonitor {
                                     warn!("[ATA] 创建token_out ATA失败: {}", e);
                                     return;
                                 }
-                                
-                                // 卖出前检查余额
                                 if trade_clone.trade_direction == crate::types::TradeDirection::Sell {
                                     let token_mint = trade_clone.token_in.mint;
                                     let ata = get_associated_token_address(&wallet.pubkey(), &token_mint);
@@ -810,11 +862,8 @@ impl GrpcMonitor {
                                         return;
                                     }
                                 }
-                                
                                 info!("[DEBUG] ATA已全部创建，开始执行swap跟单");
                                 let min_amount_out = (trade_clone.amount_out as f64 * (1.0 - executor.config.slippage_tolerance)) as u64;
-                                
-                                // Raydium CPMM分支，extra_accounts传空slice
                                 let res = TradeExecutor::execute_raydium_cpmm_trade_static(
                                     &client, &wallet, &trade_clone, &cpmm_accounts, &[], min_amount_out,
                                     None, None, None, None, None

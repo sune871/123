@@ -87,6 +87,7 @@ impl<'de> Deserialize<'de> for CachedPoolParams {
             input_token_program: Pubkey,
             #[serde(deserialize_with = "pubkey_from_str")]
             output_token_program: Pubkey,
+            #[serde(default)]
             access_count: u64,
         }
         let helper = Helper::deserialize(deserializer)?;
