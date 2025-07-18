@@ -8,6 +8,7 @@ use chrono::Utc;
 use crate::pool_cache::PoolCache;
 use crate::types::WSOL_MINT;
 use solana_client::rpc_client::RpcClient;
+use std::collections::HashSet;
 
 /// 移除get_sol_usd_price和parse_raydium_cpmm_swap_with_usd相关内容
 
@@ -42,18 +43,24 @@ pub fn parse_raydium_cpmm_swap(
     // 解析日志获取交易详情
     let swap_info = parse_swap_info_from_logs(logs)?;
     
-    // 查找池子账户并获取池子信息
-    let pool_account_index = find_pool_account_index(account_keys)?;
-    let pool_address = &account_keys[pool_account_index];
-    
     // 创建RPC客户端和缓存实例
     let rpc = RpcClient::new("https://solana-rpc.publicnode.com/f884f7c2cfa0e7ecbf30e7da70ec1da91bda3c9d04058269397a5591e7fd013e".to_string());
     let pool_cache = PoolCache::new(300);
-    
     // 从文件加载现有池子
     if let Err(e) = pool_cache.load_from_file() {
         warn!("加载池子文件失败: {}", e);
     }
+    // 获取所有已知池子地址
+    let known_pools = pool_cache.get_all_pool_states();
+    // 查找池子账户并获取池子信息
+    let pool_account_index = match find_pool_account_index(account_keys, &known_pools) {
+        Some(idx) => idx,
+        None => {
+            warn!("未能在account_keys中精准匹配到池子地址，跳过解析");
+            return Ok(None);
+        }
+    };
+    let pool_address = &account_keys[pool_account_index];
     
     // 获取池子参数（如果不存在会自动从链上加载）
     let pool_param = match pool_cache.get_pool_params(&rpc, &Pubkey::from_str(pool_address)?) {
@@ -174,28 +181,17 @@ fn extract_number_from_log(log: &str, key: &str) -> Option<u64> {
 }
 
 /// 查找池子账户索引
-fn find_pool_account_index(account_keys: &[String]) -> Result<usize> {
-    // 池子账户通常在前几个位置
-    // CPMM池子账户的特征：不是系统程序，不是代币程序，不是CPMM程序本身
-    for (i, account) in account_keys.iter().enumerate() {
-        // 跳过已知的程序账户
-        if account == crate::types::RAYDIUM_CPMM ||
-           account == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" ||
-           account == "11111111111111111111111111111111" ||
-           account.contains("oracle") ||
-           account.contains("authority") {
-            continue;
-        }
-        
-        // 池子账户通常在索引1-5之间
-        if i >= 1 && i <= 5 {
-            debug!("可能的池子账户在索引 {}: {}", i, account);
-            return Ok(i);
+fn find_pool_account_index(account_keys: &[String], known_pools: &HashSet<Pubkey>) -> Option<usize> {
+    for (i, key) in account_keys.iter().enumerate() {
+        if let Ok(pk) = Pubkey::from_str(key) {
+            if known_pools.contains(&pk) {
+                tracing::info!("[CPMM池子精准匹配] 命中池子地址: {} 索引: {}", pk, i);
+                return Some(i);
+            }
         }
     }
-    
-    // 默认返回索引1
-    Ok(1)
+    tracing::warn!("[CPMM池子精准匹配] 未在account_keys中找到已知池子地址");
+    None
 }
 
 /// 查找用户钱包地址

@@ -13,6 +13,7 @@ use serde::{Serialize, Serializer, Deserialize, Deserializer};
 use serde::de::{self, Visitor, MapAccess, Error as DeError};
 use std::fmt;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 
 fn pubkey_from_str<'de, D>(deserializer: D) -> Result<Pubkey, D::Error>
 where
@@ -391,5 +392,11 @@ impl PoolCache {
             .collect();
         hot_pools.sort_by(|a, b| b.1.cmp(&a.1));
         hot_pools.into_iter().take(limit).collect()
+    }
+
+    /// 获取所有已知池子地址
+    pub fn get_all_pool_states(&self) -> HashSet<Pubkey> {
+        let cache = self.cache.read().unwrap();
+        cache.keys().cloned().collect()
     }
 } 
