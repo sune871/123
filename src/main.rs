@@ -12,6 +12,7 @@ mod test_runner;
 mod mock_monitor;
 mod pool_cache;
 mod fast_executor;
+mod rpc_extensions;
 
 use anyhow::Result;
 use grpc_monitor::GrpcMonitor;
@@ -197,13 +198,17 @@ async fn sell_taki_test() -> Result<()> {
         &user_pubkey,
         &taki_mint,
         &wsol_mint
-    ) {
+    ).await {
         Ok(accounts) => accounts,
         Err(e) => {
             error!("构建CPMM账户失败: {}", e);
             return Err(e);
         }
     };
+
+    // === 新增：确保input/output ATA都已存在 ===
+    TradeExecutor::ensure_ata_exists_static(&rpc_client, &copy_wallet, &copy_wallet.pubkey(), &cpmm_accounts.input_mint)?;
+    TradeExecutor::ensure_ata_exists_static(&rpc_client, &copy_wallet, &copy_wallet.pubkey(), &cpmm_accounts.output_mint)?;
 
     // === 5. 构造卖出交易 ===
     let trade = TradeDetails {
@@ -212,12 +217,12 @@ async fn sell_taki_test() -> Result<()> {
         dex_type: DexType::RaydiumCPMM,
         trade_direction: TradeDirection::Sell,
         token_in: TokenInfo {
-            mint: taki_mint,
+            mint: cpmm_accounts.input_mint,
             symbol: Some("TAKI".to_string()),
             decimals: 9,
         },
         token_out: TokenInfo {
-            mint: wsol_mint,
+            mint: cpmm_accounts.output_mint,
             symbol: Some("WSOL".to_string()),
             decimals: 9,
         },
@@ -300,7 +305,7 @@ async fn buy_taki_test(pool_cache: Arc<PoolCache>) -> Result<()> {
     let wsol_mint = Pubkey::from_str("So11111111111111111111111111111111111111112")?;
 
     // 动态获取池子参数
-    let pool_param = match pool_cache.get_pool_params(&rpc_client, &pool_state) {
+    let pool_param = match pool_cache.get_pool_params(&rpc_client, &pool_state).await {
         Ok(params) => params,
         Err(e) => {
             error!("获取池子参数失败: {}", e);
@@ -315,7 +320,7 @@ async fn buy_taki_test(pool_cache: Arc<PoolCache>) -> Result<()> {
         &user_pubkey,
         &wsol_mint,
         &target_buy_mint
-    ) {
+    ).await {
         Ok(accounts) => accounts,
         Err(e) => {
             error!("构建CPMM账户失败: {}", e);
@@ -327,7 +332,11 @@ async fn buy_taki_test(pool_cache: Arc<PoolCache>) -> Result<()> {
     info!("  input_mint: {}", cpmm_accounts.input_mint);
     info!("  output_mint: {}", cpmm_accounts.output_mint);
     info!("  observation_state: {}", cpmm_accounts.observation_state);
-    
+
+    // === 新增：确保input/output ATA都已存在 ===
+    TradeExecutor::ensure_ata_exists_static(&rpc_client, &copy_wallet, &copy_wallet.pubkey(), &cpmm_accounts.input_mint)?;
+    TradeExecutor::ensure_ata_exists_static(&rpc_client, &copy_wallet, &copy_wallet.pubkey(), &cpmm_accounts.output_mint)?;
+
     // 构造交易详情
     let amount_in = (0.01 * 1_000_000_000.0) as u64;
     let trade = TradeDetails {
@@ -415,7 +424,7 @@ async fn sell_taki_all_test() -> Result<()> {
         &user_pubkey,
         &taki_mint,
         &wsol_mint
-    ) {
+    ).await {
         Ok(accounts) => accounts,
         Err(e) => {
             error!("构建CPMM账户失败: {}", e);
@@ -529,7 +538,7 @@ async fn main() -> Result<()> {
     let common_pools = vec![
         "GHq3zKabrM5k8tuEDz92hF5ZYMsszigytY6oUFhMYM2N", // WSOL-TAKI
     ];
-    pool_cache_arc.preload_pools(&rpc_client, common_pools)?;
+    pool_cache_arc.preload_pools(&rpc_client, common_pools).await?;
     info!("池子参数预加载完成");
 
     // ====== 启动定期缓存清理任务 ======

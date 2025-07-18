@@ -1,18 +1,14 @@
 use anyhow::{Result, Context};
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
-use tracing::{info, debug, warn};
 use crate::types::{TradeDetails, TradeDirection, TokenInfo, DexType};
 use crate::types::{RAYDIUM_CPMM_SWAP_BASE_INPUT, RAYDIUM_CPMM_SWAP_BASE_OUTPUT};
 use chrono::Utc;
 use crate::pool_cache::PoolCache;
 use crate::types::WSOL_MINT;
 use solana_client::rpc_client::RpcClient;
-use std::collections::HashSet;
 
-/// 移除get_sol_usd_price和parse_raydium_cpmm_swap_with_usd相关内容
-
-pub fn parse_raydium_cpmm_swap(
+pub async fn parse_raydium_cpmm_swap(
     signature: &str,
     account_keys: &[String],
     instruction_data: &[u8],
@@ -20,67 +16,30 @@ pub fn parse_raydium_cpmm_swap(
     post_balances: &[u64],
     pre_token_balances: &[serde_json::Value],
     post_token_balances: &[serde_json::Value],
-    logs: &[String],
+    _logs: &[String],
 ) -> Result<Option<TradeDetails>> {
-    // 打印所有账户以便调试
-    info!("CPMM交易账户列表：");
-    for (i, key) in account_keys.iter().enumerate() {
-        info!("  [{}] {}", i, key);
-    }
-    // 检查指令数据长度
+    // 1. 校验指令类型
     if instruction_data.len() < 8 {
         return Ok(None);
     }
-    
-    // 检查是否为CPMM swap指令
     let discriminator = &instruction_data[0..8];
-    let is_swap_base_input = discriminator == RAYDIUM_CPMM_SWAP_BASE_INPUT;
-    let is_swap_base_output = discriminator == RAYDIUM_CPMM_SWAP_BASE_OUTPUT;
-    
-    if !is_swap_base_input && !is_swap_base_output {
-        debug!("不是CPMM swap指令");
+    if discriminator != RAYDIUM_CPMM_SWAP_BASE_INPUT && discriminator != RAYDIUM_CPMM_SWAP_BASE_OUTPUT {
         return Ok(None);
     }
-    
-    let swap_type = if is_swap_base_input { "swap_base_input" } else { "swap_base_output" };
-    info!("检测到Raydium CPMM {} 指令", swap_type);
-    
-    // 解析日志获取交易详情
-    let _swap_info = parse_swap_info_from_logs(logs)?;
-    
-    // 创建RPC客户端和缓存实例
+
+    // 2. 提取池子参数
+    let pool_account_index = 3; // CPMM swap指令池子地址索引
+    if account_keys.len() <= pool_account_index {
+        return Ok(None);
+    }
+    let pool_pubkey = Pubkey::from_str(&account_keys[pool_account_index])?;
     let rpc = RpcClient::new("https://solana-rpc.publicnode.com/f884f7c2cfa0e7ecbf30e7da70ec1da91bda3c9d04058269397a5591e7fd013e".to_string());
     let pool_cache = PoolCache::new(300);
-    // 尝试加载现有池子（忽略错误）
     let _ = pool_cache.load_from_file();
-    // 获取所有已知池子地址
-    let known_pools = pool_cache.get_all_pool_states();
-    // 查找池子账户
-    let pool_account_index = 3; // CPMM swap指令实际池子地址索引
-    if account_keys.len() <= pool_account_index {
-        warn!("CPMM指令账户数量不足，无法获取池子地址");
-        return Ok(None);
-    }
-    let pool_address = &account_keys[pool_account_index];
-    let pool_pubkey = Pubkey::from_str(pool_address)?;
-    // 动态添加新池子到缓存
-    if !known_pools.contains(&pool_pubkey) {
-        info!("发现新池子，动态添加到缓存: {}", pool_pubkey);
-        if let Err(e) = pool_cache.add_pool_dynamically(&rpc, &pool_pubkey) {
-            warn!("动态添加池子失败: {}", e);
-        }
-    }
-    // 获取池子参数（如果不存在会自动从链上加载）
-    let pool_param = match pool_cache.get_pool_params(&rpc, &pool_pubkey) {
-        Ok(params) => params,
-        Err(e) => {
-            warn!("获取池子参数失败: {}", e);
-            return Ok(None);
-        }
-    };
-    
-    // 分析代币余额变化来确定交易方向和实际金额
-    let (trade_direction, token_in_info, token_out_info, actual_amount_in, actual_amount_out) = 
+    let pool_param = pool_cache.get_pool_params(&rpc, &pool_pubkey).await?;
+
+    // 3. 分析余额变化，推断方向、币对、金额
+    let (trade_direction, token_in, token_out, amount_in, amount_out) =
         analyze_token_changes_cpmm(
             pre_token_balances,
             post_token_balances,
@@ -88,344 +47,26 @@ pub fn parse_raydium_cpmm_swap(
             &pool_param.input_mint,
             &pool_param.output_mint,
         )?;
-    
-    // 计算价格
-    let price = if actual_amount_out > 0 {
-        actual_amount_in as f64 / actual_amount_out as f64
-    } else {
-        0.0
-    };
-    
-    // 获取用户钱包地址
-    let user_wallet = Pubkey::from_str(&account_keys[0])
-        .context("无法解析用户钱包地址")?;
-    info!("[DEBUG] CPMM解析结果 trade.wallet = {}", user_wallet);
-    // 计算gas费用
-    let gas_fee = calculate_gas_fee(pre_balances, post_balances)?;
-    // 获取程序ID
-    let program_id = Pubkey::from_str("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")?;
+
+    // 4. 组装 TradeDetails
     let trade_details = TradeDetails {
         signature: signature.to_string(),
-        wallet: user_wallet,
+        wallet: Pubkey::from_str(&account_keys[0])?,
         dex_type: DexType::RaydiumCPMM,
         trade_direction,
-        token_in: token_in_info,
-        token_out: token_out_info,
-        amount_in: actual_amount_in,
-        amount_out: actual_amount_out,
-        price,
+        token_in,
+        token_out,
+        amount_in,
+        amount_out,
+        price: if amount_out > 0 { amount_in as f64 / amount_out as f64 } else { 0.0 },
         pool_address: pool_pubkey,
         timestamp: Utc::now().timestamp(),
-        gas_fee,
-        program_id: program_id,
+        gas_fee: calculate_gas_fee(pre_balances, post_balances)?,
+        program_id: Pubkey::from_str("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")?,
     };
-    info!("[DEBUG] CPMM TradeDetails: {:?}", trade_details);
     Ok(Some(trade_details))
 }
 
-/// 从日志中解析交易信息
-#[derive(Debug)]
-struct SwapInfo {
-    input_mint: String,
-    input_amount: u64,
-    output_mint: String,
-    output_amount: u64,
-}
-
-fn parse_swap_info_from_logs(logs: &[String]) -> Result<SwapInfo> {
-    // 查找包含swap信息的日志
-    // Raydium CPMM的日志格式通常包含输入输出信息
-    let input_mint = None;
-    let input_amount = None;
-    let output_mint = None;
-    let output_amount = None;
-    
-    for log in logs {
-        // 查找包含swap信息的日志行
-        if log.contains("base_input") || log.contains("base_output") {
-            debug!("Swap日志: {}", log);
-        }
-        
-        // 尝试从日志中提取金额信息
-        if log.contains("amount_in:") || log.contains("input_amount:") {
-            if let Some(_amount) = extract_number_from_log(log, "amount_in:") {
-                // input_amount = Some(amount);
-            }
-        }
-        
-        if log.contains("amount_out:") || log.contains("output_amount:") {
-            if let Some(_amount) = extract_number_from_log(log, "amount_out:") {
-                // output_amount = Some(amount);
-            }
-        }
-    }
-    
-    // 如果无法从日志中获取完整信息，返回默认值
-    Ok(SwapInfo {
-        input_mint: input_mint.unwrap_or_default(),
-        input_amount: input_amount.unwrap_or(0),
-        output_mint: output_mint.unwrap_or_default(),
-        output_amount: output_amount.unwrap_or(0),
-    })
-}
-
-/// 从日志中提取数字
-fn extract_number_from_log(log: &str, key: &str) -> Option<u64> {
-    if let Some(pos) = log.find(key) {
-        let start = pos + key.len();
-        let remaining = &log[start..];
-        let number_str: String = remaining
-            .chars()
-            .skip_while(|c| c.is_whitespace() || *c == ':')
-            .take_while(|c| c.is_numeric())
-            .collect();
-        
-        number_str.parse::<u64>().ok()
-    } else {
-        None
-    }
-}
-
-/// 查找池子账户索引
-fn find_pool_account_index(account_keys: &[String], known_pools: &HashSet<Pubkey>, rpc: &RpcClient) -> Option<usize> {
-    // 首先尝试在已知池子中查找
-    for (i, key) in account_keys.iter().enumerate() {
-        if let Ok(pk) = Pubkey::from_str(key) {
-            if known_pools.contains(&pk) {
-                tracing::info!("[CPMM池子精准匹配] 命中池子地址: {} 索引: {}", pk, i);
-                return Some(i);
-            }
-        }
-    }
-    // 如果没找到，尝试通过程序ID识别池子地址
-    let cpmm_program_id = Pubkey::from_str(crate::types::RAYDIUM_CPMM).ok()?;
-    for (i, key) in account_keys.iter().enumerate() {
-        if key == "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL" ||
-           key == "D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2" ||
-           key == "11111111111111111111111111111111" ||
-           key == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" ||
-           key == crate::types::RAYDIUM_CPMM {
-            continue;
-        }
-        if let Ok(pk) = Pubkey::from_str(key) {
-            // 检查owner
-            if let Ok(acc) = rpc.get_account(&pk) {
-                if acc.owner == cpmm_program_id {
-                    tracing::info!("[CPMM池子推测] 账户{} 索引:{} owner匹配CPMM程序", pk, i);
-                    return Some(i);
-                }
-            }
-            // 一般来说，池子地址会在索引2-5之间
-            if i >= 2 && i <= 5 {
-                tracing::info!("[CPMM池子推测] 使用索引{}作为池子地址: {}", i, pk);
-                return Some(i);
-            }
-        }
-    }
-    tracing::warn!("[CPMM池子查找] 未找到合适的池子地址");
-    None
-}
-
-/// 查找用户钱包地址
-fn find_user_wallet(account_keys: &[String]) -> Result<Pubkey> {
-    // 目标钱包地址
-    const TARGET_WALLET: &str = "CuwxHwz42cNivJqWGBk6HcVvfGq47868Mo6zi4u6z9vC";
-    
-    for account in account_keys {
-        if account == TARGET_WALLET {
-            return Pubkey::from_str(account).context("无法解析用户钱包地址");
-        }
-    }
-    
-    // 如果没找到目标钱包，查找第一个非程序账户
-    for account in account_keys {
-        if !account.contains("Program") && 
-           !account.contains("oracle") &&
-           !account.contains("authority") &&
-           account != "11111111111111111111111111111111" {
-            return Pubkey::from_str(account).context("无法解析用户钱包地址");
-        }
-    }
-    
-    Err(anyhow::anyhow!("未找到用户钱包"))
-}
-
-/// 分析代币余额变化
-fn analyze_token_changes_from_logs_and_balances(
-    swap_info: &SwapInfo,
-    pre_token_balances: &[serde_json::Value],
-    post_token_balances: &[serde_json::Value],
-    pre_balances: &[u64],
-    post_balances: &[u64],
-    account_keys: &[String],
-    user_wallet: &Pubkey,
-) -> Result<(TradeDirection, TokenInfo, TokenInfo, u64, u64)> {
-    // 查找用户账户索引
-    let user_index = account_keys.iter()
-        .position(|k| k == &user_wallet.to_string())
-        .context("未找到用户账户索引")?;
-    
-    // 收集所有代币余额变化
-    let mut token_changes = Vec::new();
-    
-    // 分析前后代币余额
-    for (pre_balance, post_balance) in pre_token_balances.iter().zip(post_token_balances.iter()) {
-        if let (Some(mint), Some(pre_amount), Some(post_amount)) = (
-            pre_balance.get("mint").and_then(|m| m.as_str()),
-            extract_token_amount(pre_balance).ok(),
-            extract_token_amount(post_balance).ok(),
-        ) {
-            if pre_amount != post_amount && mint != "So11111111111111111111111111111111111111112" {
-                token_changes.push((mint.to_string(), pre_amount, post_amount));
-            }
-        }
-    }
-    
-    // 分析SOL余额变化 - 降低阈值，提高检测灵敏度
-    let sol_change = if user_index < pre_balances.len() && user_index < post_balances.len() {
-        let pre_sol = pre_balances[user_index];
-        let post_sol = post_balances[user_index];
-        let sol_diff = if pre_sol > post_sol {
-            pre_sol - post_sol
-        } else {
-            post_sol - pre_sol
-        };
-        
-        // 降低阈值到 1 SOL (1_000_000_000 lamports)
-        if sol_diff > 1_000_000_000 {
-            if pre_sol > post_sol {
-                // SOL减少，可能是买入
-                Some((sol_diff, TradeDirection::Buy))
-            } else {
-                // SOL增加，可能是卖出
-                Some((sol_diff, TradeDirection::Sell))
-            }
-        } else {
-            // 即使SOL变化很小，也尝试检测
-            debug!("SOL变化较小: {} lamports", sol_diff);
-            if pre_sol > post_sol {
-                Some((sol_diff, TradeDirection::Buy))
-            } else {
-                Some((sol_diff, TradeDirection::Sell))
-            }
-        }
-    } else {
-        None
-    };
-    
-    // 根据余额变化确定交易方向和金额
-    if let Some((sol_amount, direction)) = sol_change {
-        if let Some((token_mint, pre_token, post_token)) = token_changes.first() {
-            let token_amount = if *post_token > *pre_token {
-                *post_token - *pre_token
-            } else {
-                *pre_token - *post_token
-            };
-            
-            match direction {
-                TradeDirection::Buy => {
-                    Ok((
-                        TradeDirection::Buy,
-                        TokenInfo {
-                            mint: Pubkey::from_str("So11111111111111111111111111111111111111112")?,
-                            symbol: Some("SOL".to_string()),
-                            decimals: 9,
-                        },
-                        TokenInfo {
-                            mint: Pubkey::from_str(&token_mint)?,
-                            symbol: get_token_symbol(&token_mint),
-                            decimals: get_token_decimals(&token_mint),
-                        },
-                        sol_amount,
-                        token_amount,
-                    ))
-                }
-                TradeDirection::Sell => {
-                    Ok((
-                        TradeDirection::Sell,
-                        TokenInfo {
-                            mint: Pubkey::from_str(&token_mint)?,
-                            symbol: get_token_symbol(&token_mint),
-                            decimals: get_token_decimals(&token_mint),
-                        },
-                        TokenInfo {
-                            mint: Pubkey::from_str("So11111111111111111111111111111111111111112")?,
-                            symbol: Some("SOL".to_string()),
-                            decimals: 9,
-                        },
-                        token_amount,
-                        sol_amount,
-                    ))
-                }
-            }
-        } else {
-            // 如果没有代币变化，尝试使用日志中的信息
-            if swap_info.input_amount > 0 && swap_info.output_amount > 0 {
-                warn!("使用日志中的交易信息");
-                // 这里需要更多逻辑来确定代币类型
-                // 暂时返回一个默认的交易信息
-                Ok((
-                    direction,
-                    TokenInfo {
-                        mint: Pubkey::from_str("So11111111111111111111111111111111111111112")?,
-                        symbol: Some("SOL".to_string()),
-                        decimals: 9,
-                    },
-                    TokenInfo {
-                        mint: Pubkey::from_str("So11111111111111111111111111111111111111112")?,
-                        symbol: Some("未知".to_string()),
-                        decimals: 9,
-                    },
-                    sol_amount,
-                    swap_info.output_amount,
-                ))
-            } else {
-                Err(anyhow::anyhow!("未找到代币余额变化"))
-            }
-        }
-    } else {
-        // 如果找不到SOL变化，尝试从代币变化推断
-        if let Some((token_mint, pre_token, post_token)) = token_changes.first() {
-            let token_amount = if *post_token > *pre_token {
-                *post_token - *pre_token
-            } else {
-                *pre_token - *post_token
-            };
-            
-            // 假设这是买入操作
-            warn!("未检测到SOL变化，假设为买入操作");
-            Ok((
-                TradeDirection::Buy,
-                TokenInfo {
-                    mint: Pubkey::from_str("So11111111111111111111111111111111111111112")?,
-                    symbol: Some("SOL".to_string()),
-                    decimals: 9,
-                },
-                TokenInfo {
-                    mint: Pubkey::from_str(&token_mint)?,
-                    symbol: get_token_symbol(&token_mint),
-                    decimals: get_token_decimals(&token_mint),
-                },
-                0, // SOL数量未知
-                token_amount,
-            ))
-        } else {
-            Err(anyhow::anyhow!("未找到明显的SOL余额变化"))
-        }
-    }
-}
-
-/// 提取代币数量
-fn extract_token_amount(balance: &serde_json::Value) -> Result<u64> {
-    balance
-        .get("uiTokenAmount")
-        .and_then(|ui| ui.get("amount"))
-        .and_then(|a| a.as_str())
-        .and_then(|s| s.parse::<u64>().ok())
-        .ok_or_else(|| anyhow::anyhow!("无法提取代币数量"))
-}
-
-/// 分析CPMM代币余额变化
 fn analyze_token_changes_cpmm(
     pre_token_balances: &[serde_json::Value],
     post_token_balances: &[serde_json::Value],
@@ -434,24 +75,19 @@ fn analyze_token_changes_cpmm(
     output_mint: &Pubkey,
 ) -> Result<(TradeDirection, TokenInfo, TokenInfo, u64, u64)> {
     let user_wallet = &account_keys[0];
-    
-    // 查找用户钱包的代币余额变化
     let mut max_in_token = None;
     let mut max_out_token = None;
     let mut max_in_amount = 0u64;
     let mut max_out_amount = 0u64;
     let mut max_in_decimals = 6u8;
     let mut max_out_decimals = 6u8;
-    
     for (pre, post) in pre_token_balances.iter().zip(post_token_balances.iter()) {
         let mint = pre.get("mint").and_then(|m| m.as_str()).unwrap_or("");
         let owner = pre.get("owner").and_then(|o| o.as_str()).unwrap_or("");
         let decimals = pre.get("uiTokenAmount").and_then(|ui| ui.get("decimals")).and_then(|d| d.as_u64()).unwrap_or(6) as u8;
-        
         if owner == user_wallet {
             let pre_amt = pre.get("uiTokenAmount").and_then(|ui| ui.get("amount")).and_then(|a| a.as_str()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
             let post_amt = post.get("uiTokenAmount").and_then(|ui| ui.get("amount")).and_then(|a| a.as_str()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            
             if pre_amt > post_amt {
                 let diff = pre_amt - post_amt;
                 if diff > max_in_amount {
@@ -469,106 +105,40 @@ fn analyze_token_changes_cpmm(
             }
         }
     }
-    
-    // 确定交易方向
     let trade_direction = if max_in_token.as_ref() == Some(&WSOL_MINT.to_string()) {
         TradeDirection::Buy
     } else {
         TradeDirection::Sell
     };
-    
-    // 构造TokenInfo
     let token_in_str = max_in_token.as_ref().map(|s| s.as_str()).unwrap_or(WSOL_MINT);
     let token_out_str = max_out_token.as_ref().map(|s| s.as_str()).unwrap_or(WSOL_MINT);
-    let token_in_info = TokenInfo {
+    let token_in = TokenInfo {
         mint: Pubkey::from_str(token_in_str)?,
         symbol: get_token_symbol(token_in_str),
         decimals: max_in_decimals,
     };
-    let token_out_info = TokenInfo {
+    let token_out = TokenInfo {
         mint: Pubkey::from_str(token_out_str)?,
         symbol: get_token_symbol(token_out_str),
         decimals: max_out_decimals,
     };
-    Ok((trade_direction, token_in_info, token_out_info, max_in_amount, max_out_amount))
+    Ok((trade_direction, token_in, token_out, max_in_amount, max_out_amount))
 }
 
-/// 计算gas费用
 fn calculate_gas_fee(pre_balances: &[u64], post_balances: &[u64]) -> Result<u64> {
     if pre_balances.is_empty() || post_balances.is_empty() {
         return Ok(0);
     }
-    
     let pre_sol = pre_balances[0];
     let post_sol = post_balances[0];
-    
-    if pre_sol > post_sol {
-        Ok(pre_sol - post_sol)
-    } else {
-        Ok(0)
-    }
+    Ok(pre_sol.saturating_sub(post_sol))
 }
 
-/// 计算价格
-fn calculate_price(
-    amount_in: u64,
-    amount_out: u64,
-    token_in: &TokenInfo,
-    token_out: &TokenInfo,
-    direction: &TradeDirection,
-) -> Result<f64> {
-    let in_amount_decimal = amount_in as f64 / 10f64.powi(token_in.decimals as i32);
-    let out_amount_decimal = amount_out as f64 / 10f64.powi(token_out.decimals as i32);
-    
-    if out_amount_decimal == 0.0 {
-        return Err(anyhow::anyhow!("输出数量为0，无法计算价格"));
-    }
-    
-    match direction {
-        TradeDirection::Buy => {
-            // 买入时，价格 = SOL数量 / Token数量
-            Ok(in_amount_decimal / out_amount_decimal)
-        }
-        TradeDirection::Sell => {
-            // 卖出时，价格 = SOL数量 / Token数量  
-            Ok(out_amount_decimal / in_amount_decimal)
-        }
-    }
-}
-
-/// 格式化代币数量
-fn format_token_amount(amount: u64, decimals: u8) -> String {
-    let divisor = 10f64.powi(decimals as i32);
-    let value = amount as f64 / divisor;
-    
-    if value < 0.000001 {
-        format!("{:.9}", value)
-    } else if value < 1.0 {
-        format!("{:.6}", value)
-    } else if value < 1000.0 {
-        format!("{:.4}", value)
-    } else {
-        format!("{:.2}", value)
-    }
-}
-
-/// 获取代币符号
 fn get_token_symbol(mint: &str) -> Option<String> {
     match mint {
         "So11111111111111111111111111111111111111112" => Some("SOL".to_string()),
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" => Some("USDC".to_string()),
         "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" => Some("USDT".to_string()),
         _ => None,
-    }
-}
-
-/// 获取代币精度
-fn get_token_decimals(mint: &str) -> u8 {
-    match mint {
-        "So11111111111111111111111111111111111111112" => 9, // SOL/WSOL
-        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" => 6, // USDC
-        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" => 6, // USDT
-        // 你可以在这里补充更多常见币
-        _ => 6, // 默认6位精度，适配大部分新币
     }
 }

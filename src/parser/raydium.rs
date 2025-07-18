@@ -28,7 +28,7 @@ use solana_client::rpc_client::RpcClient;
 /// 16: User Destination Token Account
 /// 17: User Owner
 
-pub fn parse_raydium_amm_v4_swap(
+pub async fn parse_raydium_amm_v4_swap(
     signature: &str,
     account_keys: &[String],
     instruction_data: &[u8],
@@ -94,7 +94,7 @@ pub fn parse_raydium_amm_v4_swap(
     let pool_address = &account_keys[1];
     let pool_cache = PoolCache::new(300);
     let rpc = RpcClient::new("https://solana-rpc.publicnode.com/f884f7c2cfa0e7ecbf30e7da70ec1da91bda3c9d04058269397a5591e7fd013e".to_string());
-    let pool_param = pool_cache.get_pool_params(&rpc, &Pubkey::from_str(pool_address).unwrap());
+    let pool_param = pool_cache.get_pool_params(&rpc, &Pubkey::from_str(pool_address).unwrap()).await;
     let program_id = pool_param.map(|p| p.authority.clone()).unwrap_or(Pubkey::from_str(crate::types::RAYDIUM_AMM_V4).unwrap());
     let trade_details = TradeDetails {
         signature: signature.to_string(),

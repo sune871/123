@@ -14,7 +14,7 @@ impl TransactionParser {
     }
     
     /// 从交易数据中解析交易详情
-    pub fn parse_transaction_data(
+    pub async fn parse_transaction_data(
         &self,
         signature: &str,
         account_keys: &[String],
@@ -40,7 +40,7 @@ impl TransactionParser {
                     pre_token_balances,
                     post_token_balances,
                     logs,
-                )
+                ).await
             }
             DexType::PumpFun => {
                 info!("检测到Pump.fun交易，开始解析...");
@@ -53,7 +53,7 @@ impl TransactionParser {
                     pre_token_balances,
                     post_token_balances,
                     logs,
-                )
+                ).await
             }
             DexType::RaydiumCPMM => {
                 info!("检测到Raydium CPMM交易，开始解析...");
@@ -66,7 +66,7 @@ impl TransactionParser {
                     pre_token_balances,
                     post_token_balances,
                     logs,
-                )
+                ).await
             }
             DexType::RaydiumCLMM => {
                 info!("检测到Raydium CLMM交易，开始解析...");
@@ -79,7 +79,7 @@ impl TransactionParser {
                     pre_token_balances,
                     post_token_balances,
                     logs,
-                )
+                ).await
             }
             
             DexType::Unknown => {
@@ -90,7 +90,7 @@ impl TransactionParser {
     }
     
     /// 新增：只用指令账户解析Raydium CPMM
-    pub fn parse_transaction_data_with_instruction_accounts(
+    pub async fn parse_transaction_data_with_instruction_accounts(
         &self,
         signature: &str,
         instruction_accounts: &[String],
@@ -111,7 +111,7 @@ impl TransactionParser {
             pre_token_balances,
             post_token_balances,
             logs,
-        )
+        ).await
     }
     
     /// 从账户列表中识别DEX类型

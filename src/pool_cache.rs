@@ -14,6 +14,8 @@ use serde::de::{self, Visitor, MapAccess, Error as DeError};
 use std::fmt;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
+use crate::rpc_extensions::{RpcClientExt, get_account_with_timeout_async};
+use tokio::time::timeout;
 
 fn pubkey_from_str<'de, D>(deserializer: D) -> Result<Pubkey, D::Error>
 where
@@ -169,11 +171,11 @@ impl PoolCache {
     }
 
     /// 预加载常用池子参数
-    pub fn preload_pools(&self, rpc: &RpcClient, pool_addresses: Vec<&str>) -> Result<()> {
+    pub async fn preload_pools(&self, rpc: &RpcClient, pool_addresses: Vec<&str>) -> Result<()> {
         info!("开始预加载 {} 个池子参数...", pool_addresses.len());
         for pool_addr in pool_addresses {
             let pool_pubkey = Pubkey::from_str(pool_addr)?;
-            match self.load_pool_params(rpc, &pool_pubkey) {
+            match self.load_pool_params_async(rpc, &pool_pubkey).await {
                 Ok(params) => {
                     self.cache.write().unwrap().insert(pool_pubkey, params);
                     info!("成功缓存池子: {}", pool_addr);
@@ -188,38 +190,60 @@ impl PoolCache {
     }
 
     /// 获取缓存的池子参数（如果不存在则从链上加载）
-    pub fn get_pool_params(&self, rpc: &RpcClient, pool_state: &Pubkey) -> Result<CachedPoolParams> {
-        // 更新访问统计
+    pub async fn get_pool_params(&self, rpc: &RpcClient, pool_state: &Pubkey) -> Result<CachedPoolParams> {
+        // 先读锁查缓存
         {
-            let mut stats = self.access_stats.write().unwrap();
-            *stats.entry(*pool_state).or_insert(0) += 1;
-        }
-        
-        // 先检查缓存
-        if let Some(mut params) = self.cache.read().unwrap().get(pool_state).cloned() {
-            // 检查缓存是否过期
-            if params.last_updated.elapsed() <= self.ttl {
-                // 更新访问信息
-                params.last_accessed = Instant::now();
-                params.access_count += 1;
-                
-                // 更新缓存
-                self.cache.write().unwrap().insert(*pool_state, params.clone());
-                
-                info!("缓存命中池子: {} (访问次数: {})", pool_state, params.access_count);
-                return Ok(params);
-            } else {
-                warn!("池子缓存已过期: {}", pool_state);
+            let cache = self.cache.read().unwrap();
+            if let Some(params) = cache.get(pool_state) {
+                if params.last_updated.elapsed() <= self.ttl {
+                    info!("[DEBUG] get_pool_params缓存命中: {}", pool_state);
+                    return Ok(params.clone());
+                } else {
+                    warn!("[DEBUG] get_pool_params缓存过期: {}", pool_state);
+                }
             }
         }
-
-        // 缓存未命中或已过期，从链上加载
-        info!("从链上加载池子参数: {}", pool_state);
-        let mut params = self.load_pool_params(rpc, pool_state)?;
-        params.last_accessed = Instant::now();
-        params.access_count = 1;
-        
-        // 智能添加到缓存（如果缓存满了，淘汰最不常用的）
+        // 释放锁后再await慢操作
+        info!("[DEBUG] get_pool_params未命中缓存，开始异步加载池子参数: {}", pool_state);
+        let load_result = timeout(
+            std::time::Duration::from_secs(5),
+            get_account_with_timeout_async(rpc, pool_state, std::time::Duration::from_secs(5))
+        ).await;
+        let account = match load_result {
+            Ok(Ok(account)) => account,
+            Ok(Err(e)) => {
+                warn!("[DEBUG] get_pool_params链上加载失败: {}", e);
+                return Err(e);
+            }
+            Err(_) => {
+                warn!("[DEBUG] get_pool_params超时: {}", pool_state);
+                return Err(anyhow::anyhow!("池子参数加载超时"));
+            }
+        };
+        let data = account.data;
+        let cpmm_program_id = Pubkey::from_str(crate::types::RAYDIUM_CPMM)?;
+        if account.owner != cpmm_program_id {
+            return Err(anyhow::anyhow!("账户 {} 不是CPMM池子，owner是: {}", pool_state, account.owner));
+        }
+        if data.len() < 328 {
+            return Err(anyhow::anyhow!("池子数据长度不足: {} < 328", data.len()));
+        }
+        let params = CachedPoolParams {
+            pool_state: *pool_state,
+            authority: Pubkey::from_str("GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL").unwrap(),
+            amm_config: Pubkey::new_from_array(data[8..40].try_into().unwrap()),
+            input_vault: Pubkey::new_from_array(data[72..104].try_into().unwrap()),
+            output_vault: Pubkey::new_from_array(data[104..136].try_into().unwrap()),
+            input_mint: Pubkey::new_from_array(data[168..200].try_into().unwrap()),
+            output_mint: Pubkey::new_from_array(data[200..232].try_into().unwrap()),
+            input_token_program: Pubkey::new_from_array(data[232..264].try_into().unwrap()),
+            output_token_program: Pubkey::new_from_array(data[264..296].try_into().unwrap()),
+            observation_state: Pubkey::new_from_array(data[296..328].try_into().unwrap()),
+            last_updated: Instant::now(),
+            access_count: 1,
+            last_accessed: Instant::now(),
+        };
+        // 写锁插入缓存
         {
             let mut cache = self.cache.write().unwrap();
             if cache.len() >= self.max_cache_size {
@@ -227,17 +251,7 @@ impl PoolCache {
             }
             cache.insert(*pool_state, params.clone());
         }
-        
-        // 定期保存到文件（每10次访问保存一次）
-        {
-            let stats = self.access_stats.read().unwrap();
-            if stats.get(pool_state).unwrap_or(&0) % 10 == 0 {
-                if let Err(e) = self.save_to_file() {
-                    error!("保存池子参数到文件失败: {}", e);
-                }
-            }
-        }
-        
+        info!("[DEBUG] get_pool_params链上加载并缓存完成: {}", pool_state);
         Ok(params)
     }
 
@@ -258,83 +272,74 @@ impl PoolCache {
     }
 
     /// 动态添加新池子
-    pub fn add_pool_dynamically(&self, rpc: &RpcClient, pool_state: &Pubkey) -> Result<()> {
-        info!("动态添加新池子: {}", pool_state);
-        
-        // 检查是否已存在
-        if self.cache.read().unwrap().contains_key(pool_state) {
-            info!("池子已存在: {}", pool_state);
-            return Ok(());
-        }
-
-        // 从链上加载
-        let mut params = self.load_pool_params(rpc, pool_state)?;
-        params.last_accessed = Instant::now();
-        params.access_count = 1;
-        
-        // 智能添加到缓存
+    pub async fn add_pool_dynamically(&self, rpc: &RpcClient, pool_state: &Pubkey) -> Result<()> {
+        info!("[DEBUG] add_pool_dynamically: {}", pool_state);
+        // 先读锁查缓存
         {
-            let mut cache = self.cache.write().unwrap();
-            if cache.len() >= self.max_cache_size {
-                self.evict_least_used(&mut cache);
+            let cache = self.cache.read().unwrap();
+            if cache.contains_key(pool_state) {
+                info!("池子已存在: {}", pool_state);
+                return Ok(());
             }
-            cache.insert(*pool_state, params);
         }
-        
+        // 释放锁后再await慢操作
+        let params = self.get_pool_params(rpc, pool_state).await?;
+        // 写锁插入缓存（get_pool_params已做，这里可省略）
         // 保存到文件
         self.save_to_file()?;
-        
         info!("成功添加新池子: {}", pool_state);
         Ok(())
     }
 
     /// 构建交易账户（极速版）
-    pub fn build_swap_accounts(&self, 
+    pub async fn build_swap_accounts(&self, 
         rpc: &RpcClient,
         pool_state: &Pubkey, 
         user_pubkey: &Pubkey,
-        input_mint: &Pubkey,
-        output_mint: &Pubkey
+        _input_mint: &Pubkey, // 忽略外部传入
+        _output_mint: &Pubkey // 忽略外部传入
     ) -> Result<RaydiumCpmmSwapAccounts> {
-        let params = self.get_pool_params(rpc, pool_state)?;
-        
+        let params = self.get_pool_params(rpc, pool_state).await?;
         Ok(RaydiumCpmmSwapAccounts {
             payer: *user_pubkey,
             authority: params.authority,
             amm_config: params.amm_config,
             pool_state: params.pool_state,
-            user_input_ata: spl_associated_token_account::get_associated_token_address(user_pubkey, input_mint),
-            user_output_ata: spl_associated_token_account::get_associated_token_address(user_pubkey, output_mint),
+            user_input_ata: spl_associated_token_account::get_associated_token_address(user_pubkey, &params.input_mint),
+            user_output_ata: spl_associated_token_account::get_associated_token_address(user_pubkey, &params.output_mint),
             input_vault: params.input_vault,
             output_vault: params.output_vault,
             input_token_program: params.input_token_program,
             output_token_program: params.output_token_program,
-            input_mint: *input_mint,
-            output_mint: *output_mint,
+            input_mint: params.input_mint,
+            output_mint: params.output_mint,
             observation_state: params.observation_state,
         })
     }
 
-    /// 从链上加载池子参数
-    fn load_pool_params(&self, rpc: &RpcClient, pool_state: &Pubkey) -> Result<CachedPoolParams> {
-        let account = rpc.get_account(pool_state)?;
+    /// 从链上加载池子参数（异步）
+    pub async fn load_pool_params_async(&self, rpc: &RpcClient, pool_state: &Pubkey) -> Result<CachedPoolParams> {
+        use std::time::Duration;
+        let account = get_account_with_timeout_async(rpc, pool_state, Duration::from_secs(5)).await?;
         let data = account.data;
-        
-        if data.len() < 328 {
-            return Err(anyhow::anyhow!("池子数据长度不足"));
+        let cpmm_program_id = Pubkey::from_str(crate::types::RAYDIUM_CPMM)?;
+        if account.owner != cpmm_program_id {
+            return Err(anyhow::anyhow!("账户 {} 不是CPMM池子，owner是: {}", pool_state, account.owner));
         }
-        
+        if data.len() < 328 {
+            return Err(anyhow::anyhow!("池子数据长度不足: {} < 328", data.len()));
+        }
         Ok(CachedPoolParams {
             pool_state: *pool_state,
             authority: Pubkey::from_str("GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL").unwrap(),
-            amm_config: Pubkey::new_from_array(data[8..40].try_into()?),
-            input_vault: Pubkey::new_from_array(data[72..104].try_into()?),
-            output_vault: Pubkey::new_from_array(data[104..136].try_into()?),
-            input_mint: Pubkey::new_from_array(data[168..200].try_into()?),
-            output_mint: Pubkey::new_from_array(data[200..232].try_into()?),
-            input_token_program: Pubkey::new_from_array(data[232..264].try_into()?),
-            output_token_program: Pubkey::new_from_array(data[264..296].try_into()?),
-            observation_state: Pubkey::new_from_array(data[296..328].try_into()?),
+            amm_config: Pubkey::new_from_array(data[8..40].try_into().unwrap()),
+            input_vault: Pubkey::new_from_array(data[72..104].try_into().unwrap()),
+            output_vault: Pubkey::new_from_array(data[104..136].try_into().unwrap()),
+            input_mint: Pubkey::new_from_array(data[168..200].try_into().unwrap()),
+            output_mint: Pubkey::new_from_array(data[200..232].try_into().unwrap()),
+            input_token_program: Pubkey::new_from_array(data[232..264].try_into().unwrap()),
+            output_token_program: Pubkey::new_from_array(data[264..296].try_into().unwrap()),
+            observation_state: Pubkey::new_from_array(data[296..328].try_into().unwrap()),
             last_updated: Instant::now(),
             access_count: 0,
             last_accessed: Instant::now(),

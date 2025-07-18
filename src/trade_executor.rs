@@ -409,10 +409,35 @@ impl TradeExecutor {
         instruction_data: Vec<u8>,
         program_id: &Pubkey,
     ) -> solana_sdk::instruction::Instruction {
-        use solana_sdk::pubkey::Pubkey;
-        use solana_sdk::instruction::AccountMeta;
+        println!("[DEBUG] account_keys.len() = {}", account_keys.len());
+        println!("[DEBUG] is_signer.len() = {}", is_signer.len());
+        println!("[DEBUG] is_writable.len() = {}", is_writable.len());
+        for (i, k) in account_keys.iter().enumerate() {
+            println!("[DEBUG] account_keys[{}] = {}", i, k);
+        }
+        for (i, s) in is_signer.iter().enumerate() {
+            println!("[DEBUG] is_signer[{}] = {}", i, s);
+        }
+        for (i, w) in is_writable.iter().enumerate() {
+            println!("[DEBUG] is_writable[{}] = {}", i, w);
+        }
+        assert_eq!(account_keys.len(), is_signer.len(), "account_keys 和 is_signer 长度不一致");
+        assert_eq!(account_keys.len(), is_writable.len(), "account_keys 和 is_writable 长度不一致");
         let metas: Vec<AccountMeta> = account_keys.iter().enumerate().map(|(i, key)| {
-            let pubkey = Pubkey::from_str(key).unwrap();
+            let pubkey = match Pubkey::from_str(key) {
+                Ok(pk) => pk,
+                Err(e) => {
+                    // 自动去除首尾空格、换行、不可见字符后重试
+                    let cleaned = key.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}' || c == '\r' || c == '\n');
+                    match Pubkey::from_str(cleaned) {
+                        Ok(pk2) => {
+                            println!("[DEBUG] Pubkey::from_str 修正成功: 原始key='{}', 修正后='{}'", key, cleaned);
+                            pk2
+                        },
+                        Err(e2) => panic!("[FATAL] Pubkey::from_str 解析失败: 原始key='{}', 修正后='{}', 错误1={:?}, 错误2={:?}", key, cleaned, e, e2)
+                    }
+                }
+            };
             if is_signer[i] {
                 AccountMeta::new(pubkey, true)
             } else if is_writable[i] {
@@ -493,19 +518,109 @@ impl TradeExecutor {
         chain_instruction_data: Option<Vec<u8>>,
         chain_program_id: Option<&Pubkey>,
     ) -> Result<ExecutedTrade> {
-        info!("执行Raydium CPMM交易(合并ATA+swap)...");
-        let recent_blockhash = client.get_latest_blockhash()?;
+        use std::fs;
+        use serde_json::Value;
+        use solana_sdk::pubkey::Pubkey;
+        use solana_sdk::instruction::AccountMeta;
+        use std::str::FromStr;
+        // 1. 优先查找本地mock_trades.json或trade_records.json中最新一笔Raydium CPMM swap链上指令
+        let mut used_chain = false;
+        let mut chain_keys: Option<Vec<String>> = None;
+        let mut chain_signers: Option<Vec<bool>> = None;
+        let mut chain_writables: Option<Vec<bool>> = None;
+        let mut chain_data: Option<Vec<u8>> = None;
+        let mut chain_pid: Option<Pubkey> = None;
+        // 你可以在这里插入自定义的链上抓取逻辑，或读取本地json
+        if let Ok(content) = fs::read_to_string("mock_trades.json") {
+            for line in content.lines() {
+                if let Ok(val) = serde_json::from_str::<Value>(line) {
+                    if val.get("dex_type").and_then(|v| v.as_str()) == Some("RaydiumCPMM") {
+                        // 这里假设你有account_keys, is_signer, is_writable, data, program_id字段
+                        if let (Some(keys), Some(signers), Some(writables), Some(data), Some(pid)) = (
+                            val.get("account_keys"),
+                            val.get("is_signer"),
+                            val.get("is_writable"),
+                            val.get("data"),
+                            val.get("program_id")
+                        ) {
+                            let keys: Vec<String> = keys.as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+                            let signers: Vec<bool> = signers.as_array().unwrap().iter().map(|v| v.as_bool().unwrap()).collect();
+                            let writables: Vec<bool> = writables.as_array().unwrap().iter().map(|v| v.as_bool().unwrap()).collect();
+                            let data = hex::decode(data.as_str().unwrap().trim_start_matches("0x")).unwrap();
+                            let pid = Pubkey::from_str(pid.as_str().unwrap()).unwrap();
+                            chain_keys = Some(keys);
+                            chain_signers = Some(signers);
+                            chain_writables = Some(writables);
+                            chain_data = Some(data);
+                            chain_pid = Some(pid);
+                            used_chain = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // 2. 如果有链上数据，直接复刻
+        if used_chain {
+            tracing::info!("[自动化] 使用链上真实账户顺序+data复刻Raydium CPMM swap指令");
+            let swap_ix = Self::create_raydium_cpmm_swap_ix_from_chain(
+                trade,
+                &chain_keys.as_ref().unwrap(),
+                &chain_signers.as_ref().unwrap(),
+                &chain_writables.as_ref().unwrap(),
+                chain_data.as_ref().unwrap().clone(),
+                &chain_pid.as_ref().unwrap()
+            );
+            let recent_blockhash = client.get_latest_blockhash()?;
+            let message = solana_sdk::message::Message::new(&[swap_ix], Some(&wallet.pubkey()));
+            let mut transaction = solana_sdk::transaction::Transaction::new_unsigned(message);
+            transaction.sign(&[wallet.as_ref()], recent_blockhash);
+            match client.send_and_confirm_transaction(&transaction) {
+                Ok(signature) => {
+                    info!("跟单交易成功: {}", signature);
+                    return Ok(ExecutedTrade {
+                        original_signature: trade.signature.clone(),
+                        copy_signature: signature.to_string(),
+                        trade_direction: trade.trade_direction.clone(),
+                        amount_in: trade.amount_in,
+                        amount_out: trade.amount_out,
+                        price: trade.price,
+                        gas_fee: trade.gas_fee,
+                        timestamp: chrono::Utc::now().timestamp(),
+                        success: true,
+                        error_message: None,
+                    });
+                }
+                Err(e) => {
+                    error!("跟单交易失败: {}", e);
+                    return Ok(ExecutedTrade {
+                        original_signature: trade.signature.clone(),
+                        copy_signature: "".to_string(),
+                        trade_direction: trade.trade_direction.clone(),
+                        amount_in: trade.amount_in,
+                        amount_out: trade.amount_out,
+                        price: trade.price,
+                        gas_fee: trade.gas_fee,
+                        timestamp: chrono::Utc::now().timestamp(),
+                        success: false,
+                        error_message: Some(e.to_string()),
+                    });
+                }
+            }
+        }
+        // 3. fallback到本地Anchor序列化
+        tracing::warn!("[自动化] 未找到链上真实账户顺序+data，fallback到本地Anchor序列化，可能不兼容主网合约！");
         let instructions = Self::combine_ata_and_swap_instructions_static(
             client, wallet, trade, cpmm_accounts, extra_accounts, min_amount_out,
             chain_account_keys, chain_is_signer, chain_is_writable, chain_instruction_data, chain_program_id
         )?;
-        let message = Message::new(&instructions, Some(&wallet.pubkey()));
-        let mut transaction = Transaction::new_unsigned(message);
-        transaction.sign(&[wallet.as_ref()], recent_blockhash);
+        let message = solana_sdk::message::Message::new(&instructions, Some(&wallet.pubkey()));
+        let mut transaction = solana_sdk::transaction::Transaction::new_unsigned(message);
+        transaction.sign(&[wallet.as_ref()], client.get_latest_blockhash()?);
         match client.send_and_confirm_transaction(&transaction) {
             Ok(signature) => {
                 info!("跟单交易成功: {}", signature);
-                Ok(ExecutedTrade {
+                return Ok(ExecutedTrade {
                     original_signature: trade.signature.clone(),
                     copy_signature: signature.to_string(),
                     trade_direction: trade.trade_direction.clone(),
@@ -513,29 +628,14 @@ impl TradeExecutor {
                     amount_out: trade.amount_out,
                     price: trade.price,
                     gas_fee: trade.gas_fee,
-                    timestamp: Utc::now().timestamp(),
+                    timestamp: chrono::Utc::now().timestamp(),
                     success: true,
                     error_message: None,
-                })
+                });
             }
             Err(e) => {
                 error!("跟单交易失败: {}", e);
-                // 兼容所有solana-client版本，直接打印data的Debug信息
-                if let solana_client::client_error::ClientErrorKind::RpcError(
-                    solana_client::rpc_request::RpcError::RpcResponseError { data, .. }
-                ) = &e.kind {
-                    error!("[模拟日志] data: {:?}", data);
-                }
-                // 打印input/output ATA余额、mint、owner
-                let input_ata = cpmm_accounts.user_input_ata;
-                let output_ata = cpmm_accounts.user_output_ata;
-                let input_ata_acc = client.get_account(&input_ata);
-                let output_ata_acc = client.get_account(&output_ata);
-                error!("[调试] input_ata: {} acc: {:?}", input_ata, input_ata_acc);
-                error!("[调试] output_ata: {} acc: {:?}", output_ata, output_ata_acc);
-                error!("[调试] input_mint: {} output_mint: {}", cpmm_accounts.input_mint, cpmm_accounts.output_mint);
-                error!("[调试] payer: {} authority: {} pool_state: {} observation_state: {}", cpmm_accounts.payer, cpmm_accounts.authority, cpmm_accounts.pool_state, cpmm_accounts.observation_state);
-                Ok(ExecutedTrade {
+                return Ok(ExecutedTrade {
                     original_signature: trade.signature.clone(),
                     copy_signature: "".to_string(),
                     trade_direction: trade.trade_direction.clone(),
@@ -543,10 +643,10 @@ impl TradeExecutor {
                     amount_out: trade.amount_out,
                     price: trade.price,
                     gas_fee: trade.gas_fee,
-                    timestamp: Utc::now().timestamp(),
+                    timestamp: chrono::Utc::now().timestamp(),
                     success: false,
                     error_message: Some(e.to_string()),
-                })
+                });
             }
         }
     }

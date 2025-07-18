@@ -22,7 +22,7 @@ use solana_client::rpc_client::RpcClient;
 /// 10: Event Authority
 /// 11: Program
 
-pub fn parse_pump_trade(
+pub async fn parse_pump_trade(
     signature: &str,
     account_keys: &[String],
     instruction_data: &[u8],
@@ -119,7 +119,7 @@ pub fn parse_pump_trade(
     
     let pool_cache = crate::pool_cache::PoolCache::new(300);
     let rpc = RpcClient::new("https://solana-rpc.publicnode.com/f884f7c2cfa0e7ecbf30e7da70ec1da91bda3c9d04058269397a5591e7fd013e".to_string());
-    let pool_param = pool_cache.get_pool_params(&rpc, &Pubkey::from_str(mint_address).unwrap());
+    let pool_param = pool_cache.get_pool_params(&rpc, &Pubkey::from_str(mint_address).unwrap()).await;
     let program_id = pool_param.map(|p| p.authority.clone()).unwrap_or(Pubkey::from_str(crate::types::PUMP_FUN_PROGRAM).unwrap());
     let trade_details = TradeDetails {
         signature: signature.to_string(),

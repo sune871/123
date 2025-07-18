@@ -297,6 +297,7 @@ impl GrpcMonitor {
                             let instruction_accounts: Vec<String> = instruction.accounts.iter()
                                 .filter_map(|&idx| account_keys.get(idx as usize).cloned())
                                 .collect();
+                            info!("[DEBUG] 即将await parse_transaction_data_with_instruction_accounts");
                             let trade_result = parser.parse_transaction_data_with_instruction_accounts(
                                 &signature,
                                 &instruction_accounts,
@@ -306,35 +307,35 @@ impl GrpcMonitor {
                                 &pre_token_balances,
                                 &post_token_balances,
                                 &meta.log_messages,
-                            );
-                            // 替换原有is_signer和is_writable推断逻辑
-                            let mut chain_is_signer = Vec::new();
-                            let mut chain_is_writable = Vec::new();
-                            if let Some(msg) = &transaction.message {
-                                if let Some(header) = &msg.header {
-                                    let total_keys = msg.account_keys.len();
-                                    chain_is_signer = vec![false; total_keys];
-                                    chain_is_writable = vec![false; total_keys];
-                                    // 前 num_required_signatures 个是 signer
-                                    for i in 0..header.num_required_signatures as usize {
-                                        chain_is_signer[i] = true;
-                                    }
-                                    // 前 (num_required_signatures - num_readonly_signed_accounts) 个 signer 是 writable
-                                    for i in 0..(header.num_required_signatures - header.num_readonly_signed_accounts) as usize {
-                                        chain_is_writable[i] = true;
-                                    }
-                                    // 非 signer 部分
-                                    let mut i = header.num_required_signatures as usize;
-                                    // 非 signer 里，前 (total_keys - i - num_readonly_unsigned_accounts) 个是 writable
-                                    for j in 0..(total_keys - i - header.num_readonly_unsigned_accounts as usize) {
-                                        chain_is_writable[i + j] = true;
-                                    }
-                                    // 其余都是 readonly
-                                }
-                            }
+                            ).await;
+                            info!("[DEBUG] await parse_transaction_data_with_instruction_accounts完成");
                             match trade_result {
                                 Ok(Some(trade_details)) => {
-                                    // 传递链上账户顺序和权限到handle_parsed_trade
+                                    // 替换原有is_signer和is_writable推断逻辑
+                                    let mut chain_is_signer = Vec::new();
+                                    let mut chain_is_writable = Vec::new();
+                                    if let Some(msg) = &transaction.message {
+                                        if let Some(header) = &msg.header {
+                                            let total_keys = msg.account_keys.len();
+                                            chain_is_signer = vec![false; total_keys];
+                                            chain_is_writable = vec![false; total_keys];
+                                            // 前 num_required_signatures 个是 signer
+                                            for i in 0..header.num_required_signatures as usize {
+                                                chain_is_signer[i] = true;
+                                            }
+                                            // 前 (num_required_signatures - num_readonly_signed_accounts) 个 signer 是 writable
+                                            for i in 0..(header.num_required_signatures - header.num_readonly_signed_accounts) as usize {
+                                                chain_is_writable[i] = true;
+                                            }
+                                            // 非 signer 部分
+                                            let mut i = header.num_required_signatures as usize;
+                                            // 非 signer 里，前 (total_keys - i - num_readonly_unsigned_accounts) 个是 writable
+                                            for j in 0..(total_keys - i - header.num_readonly_unsigned_accounts as usize) {
+                                                chain_is_writable[i + j] = true;
+                                            }
+                                            // 其余都是 readonly
+                                        }
+                                    }
                                     self.handle_parsed_trade_with_chain_meta(
                                         trade_details,
                                         instruction_accounts.clone(),
@@ -353,6 +354,7 @@ impl GrpcMonitor {
                             continue;
                         }
                         // 其它DEX类型保持原有逻辑
+                        info!("[DEBUG] 即将await parse_transaction_data (其它DEX)");
                         let trade_result = parser.parse_transaction_data(
                             &signature,
                             &account_keys,
@@ -362,35 +364,35 @@ impl GrpcMonitor {
                             &pre_token_balances,
                             &post_token_balances,
                             &meta.log_messages,
-                        );
-                        // 替换原有is_signer和is_writable推断逻辑
-                        let mut chain_is_signer = Vec::new();
-                        let mut chain_is_writable = Vec::new();
-                        if let Some(msg) = &transaction.message {
-                            if let Some(header) = &msg.header {
-                                let total_keys = msg.account_keys.len();
-                                chain_is_signer = vec![false; total_keys];
-                                chain_is_writable = vec![false; total_keys];
-                                // 前 num_required_signatures 个是 signer
-                                for i in 0..header.num_required_signatures as usize {
-                                    chain_is_signer[i] = true;
-                                }
-                                // 前 (num_required_signatures - num_readonly_signed_accounts) 个 signer 是 writable
-                                for i in 0..(header.num_required_signatures - header.num_readonly_signed_accounts) as usize {
-                                    chain_is_writable[i] = true;
-                                }
-                                // 非 signer 部分
-                                let mut i = header.num_required_signatures as usize;
-                                // 非 signer 里，前 (total_keys - i - num_readonly_unsigned_accounts) 个是 writable
-                                for j in 0..(total_keys - i - header.num_readonly_unsigned_accounts as usize) {
-                                    chain_is_writable[i + j] = true;
-                                }
-                                // 其余都是 readonly
-                            }
-                        }
+                        ).await;
+                        info!("[DEBUG] await parse_transaction_data (其它DEX)完成");
                         match trade_result {
                             Ok(Some(trade_details)) => {
-                                // 传递链上账户顺序和权限到handle_parsed_trade
+                                // 替换原有is_signer和is_writable推断逻辑
+                                let mut chain_is_signer = Vec::new();
+                                let mut chain_is_writable = Vec::new();
+                                if let Some(msg) = &transaction.message {
+                                    if let Some(header) = &msg.header {
+                                        let total_keys = msg.account_keys.len();
+                                        chain_is_signer = vec![false; total_keys];
+                                        chain_is_writable = vec![false; total_keys];
+                                        // 前 num_required_signatures 个是 signer
+                                        for i in 0..header.num_required_signatures as usize {
+                                            chain_is_signer[i] = true;
+                                        }
+                                        // 前 (num_required_signatures - num_readonly_signed_accounts) 个 signer 是 writable
+                                        for i in 0..(header.num_required_signatures - header.num_readonly_signed_accounts) as usize {
+                                            chain_is_writable[i] = true;
+                                        }
+                                        // 非 signer 部分
+                                        let mut i = header.num_required_signatures as usize;
+                                        // 非 signer 里，前 (total_keys - i - num_readonly_unsigned_accounts) 个是 writable
+                                        for j in 0..(total_keys - i - header.num_readonly_unsigned_accounts as usize) {
+                                            chain_is_writable[i + j] = true;
+                                        }
+                                        // 其余都是 readonly
+                                    }
+                                }
                                 self.handle_parsed_trade_with_chain_meta(
                                     trade_details,
                                     account_keys.clone(),
@@ -516,7 +518,7 @@ impl GrpcMonitor {
                                     &wallet.pubkey(),
                                     &trade_clone.token_in.mint,
                                     &trade_clone.token_out.mint
-                                ) {
+                                ).await {
                                     Ok(accounts) => accounts,
                                     Err(e) => {
                                         error!("构建CPMM账户失败: {}", e);
@@ -835,13 +837,22 @@ impl GrpcMonitor {
                                     &wallet.pubkey(),
                                     &trade_clone.token_in.mint,
                                     &trade_clone.token_out.mint
-                                ) {
+                                ).await {
                                     Ok(accounts) => accounts,
                                     Err(e) => {
                                         error!("构建CPMM账户失败: {}", e);
                                         return;
                                     }
                                 };
+                                // === 新增：确保input/output ATA都已存在 ===
+                                if let Err(e) = TradeExecutor::ensure_ata_exists_static(&client, &wallet, &wallet.pubkey(), &cpmm_accounts.input_mint) {
+                                    warn!("[ATA] 创建input ATA失败: {}", e);
+                                    return;
+                                }
+                                if let Err(e) = TradeExecutor::ensure_ata_exists_static(&client, &wallet, &wallet.pubkey(), &cpmm_accounts.output_mint) {
+                                    warn!("[ATA] 创建output ATA失败: {}", e);
+                                    return;
+                                }
                                 info!("[DEBUG] tokio::spawn内，先同步创建ATA");
                                 if let Err(e) = TradeExecutor::ensure_ata_exists_static(&client, &wallet, &wallet.pubkey(), &trade_clone.token_in.mint) {
                                     warn!("[ATA] 创建token_in ATA失败: {}", e);
