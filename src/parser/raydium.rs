@@ -5,7 +5,8 @@ use tracing::info;
 use crate::types::{TradeDetails, DexType, TradeDirection, TokenInfo, WSOL_MINT, RAYDIUM_AMM_SWAP_INSTRUCTION};
 use crate::parser;
 use chrono::Utc;
-use wallet_copier::pool_loader::PoolLoader;
+use crate::pool_cache::PoolCache;
+use solana_client::rpc_client::RpcClient;
 
 /// Raydium Swap指令的账户布局
 /// 0: Token Program
@@ -91,9 +92,10 @@ pub fn parse_raydium_amm_v4_swap(
     
     // 获取池子地址（AMM ID）
     let pool_address = &account_keys[1];
-    let loader = PoolLoader::load();
-    let pool_param = loader.find_amm_by_pool(pool_address);
-    let program_id = pool_param.and_then(|p| p.program_id.clone()).unwrap_or(crate::types::RAYDIUM_AMM_V4.to_string());
+    let pool_cache = PoolCache::new(300);
+    let rpc = RpcClient::new("https://solana-rpc.publicnode.com/f884f7c2cfa0e7ecbf30e7da70ec1da91bda3c9d04058269397a5591e7fd013e".to_string());
+    let pool_param = pool_cache.get_pool_params(&rpc, &Pubkey::from_str(pool_address).unwrap());
+    let program_id = pool_param.map(|p| p.authority.clone()).unwrap_or(Pubkey::from_str(crate::types::RAYDIUM_AMM_V4).unwrap());
     let trade_details = TradeDetails {
         signature: signature.to_string(),
         wallet: Pubkey::from_str(user_wallet)?,
@@ -107,7 +109,7 @@ pub fn parse_raydium_amm_v4_swap(
         pool_address: Pubkey::from_str(pool_address)? ,
         timestamp: Utc::now().timestamp(),
         gas_fee,
-        program_id: Pubkey::from_str(&program_id)?,
+        program_id: program_id,
     };
     
     info!("成功解析Raydium交易:");

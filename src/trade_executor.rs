@@ -470,20 +470,10 @@ impl TradeExecutor {
         // swap指令
         if let (Some(keys), Some(signers), Some(writables), Some(data), Some(pid)) = (chain_account_keys, chain_is_signer, chain_is_writable, chain_instruction_data, chain_program_id) {
             let swap_ix = Self::create_raydium_cpmm_swap_ix_from_chain(trade, keys, signers, writables, data, pid);
-            tracing::info!("[账户顺序打印][链上复刻] swap指令账户列表:");
-            for (i, acc) in swap_ix.accounts.iter().enumerate() {
-                tracing::info!("  [{}] {} signer:{} writable:{}", i, acc.pubkey, acc.is_signer, acc.is_writable);
-            }
             instructions.push(swap_ix);
         } else {
             // 主流程全部切换为v4写法
             let mut swap_instructions = Self::create_raydium_cpmm_swap_instructions_v4(wallet, trade, cpmm_accounts, min_amount_out)?;
-            if let Some(swap_ix) = swap_instructions.get(0) {
-                tracing::info!("[账户顺序打印][v4] swap指令账户列表:");
-                for (i, acc) in swap_ix.accounts.iter().enumerate() {
-                    tracing::info!("  [{}] {} signer:{} writable:{}", i, acc.pubkey, acc.is_signer, acc.is_writable);
-                }
-            }
             instructions.append(&mut swap_instructions);
         }
         Ok(instructions)
@@ -509,13 +499,6 @@ impl TradeExecutor {
             client, wallet, trade, cpmm_accounts, extra_accounts, min_amount_out,
             chain_account_keys, chain_is_signer, chain_is_writable, chain_instruction_data, chain_program_id
         )?;
-        // 再次打印所有指令的账户顺序
-        for (ix_idx, ix) in instructions.iter().enumerate() {
-            tracing::info!("[账户顺序打印] 指令{}: program_id: {}", ix_idx, ix.program_id);
-            for (i, acc) in ix.accounts.iter().enumerate() {
-                tracing::info!("  [{}] {} signer:{} writable:{}", i, acc.pubkey, acc.is_signer, acc.is_writable);
-            }
-        }
         let message = Message::new(&instructions, Some(&wallet.pubkey()));
         let mut transaction = Transaction::new_unsigned(message);
         transaction.sign(&[wallet.as_ref()], recent_blockhash);

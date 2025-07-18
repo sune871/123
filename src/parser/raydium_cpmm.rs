@@ -5,8 +5,9 @@ use tracing::{info, debug, warn};
 use crate::types::{TradeDetails, TradeDirection, TokenInfo, DexType};
 use crate::types::{RAYDIUM_CPMM_SWAP_BASE_INPUT, RAYDIUM_CPMM_SWAP_BASE_OUTPUT};
 use chrono::Utc;
+use crate::pool_cache::PoolCache;
 use crate::types::WSOL_MINT;
-use wallet_copier::pool_loader::PoolLoader;
+use solana_client::rpc_client::RpcClient;
 
 /// 移除get_sol_usd_price和parse_raydium_cpmm_swap_with_usd相关内容
 
@@ -44,136 +45,66 @@ pub fn parse_raydium_cpmm_swap(
     // 查找池子账户并获取池子信息
     let pool_account_index = find_pool_account_index(account_keys)?;
     let pool_address = &account_keys[pool_account_index];
-    let loader = PoolLoader::load();
-    let pool_param = loader.find_cpmm_by_pool(pool_address);
-    let program_id = pool_param.and_then(|p| p.program_id.clone()).unwrap_or(crate::types::RAYDIUM_CPMM.to_string());
     
-    // 查找用户钱包
-    let user_wallet = find_user_wallet(account_keys)?;
-
-    // 1. 找到目标钱包的WSOL账户余额变化
-    let mut wsol_pre = 0u64;
-    let mut wsol_post = 0u64;
-    let mut found_wsol = false;
-    for (pre, post) in pre_token_balances.iter().zip(post_token_balances.iter()) {
-        let mint = pre.get("mint").and_then(|m| m.as_str()).unwrap_or("");
-        let owner = pre.get("owner").and_then(|o| o.as_str()).unwrap_or("");
-        if mint == WSOL_MINT && owner == user_wallet.to_string() {
-            wsol_pre = pre.get("uiTokenAmount").and_then(|ui| ui.get("amount")).and_then(|a| a.as_str()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            wsol_post = post.get("uiTokenAmount").and_then(|ui| ui.get("amount")).and_then(|a| a.as_str()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            found_wsol = true;
-            break;
-        }
+    // 创建RPC客户端和缓存实例
+    let rpc = RpcClient::new("https://solana-rpc.publicnode.com/f884f7c2cfa0e7ecbf30e7da70ec1da91bda3c9d04058269397a5591e7fd013e".to_string());
+    let pool_cache = PoolCache::new(300);
+    
+    // 从文件加载现有池子
+    if let Err(e) = pool_cache.load_from_file() {
+        warn!("加载池子文件失败: {}", e);
     }
-    // 如果没找到WSOL账户，尝试用主账户SOL余额变化
-    let mut sol_change = 0u64;
-    if !found_wsol {
-        let user_index = account_keys.iter().position(|k| k == &user_wallet.to_string());
-        if let Some(idx) = user_index {
-            if idx < pre_balances.len() && idx < post_balances.len() {
-                let pre_sol = pre_balances[idx];
-                let post_sol = post_balances[idx];
-                sol_change = if pre_sol > post_sol { pre_sol - post_sol } else { post_sol - pre_sol };
-                tracing::warn!("未找到WSOL账户，使用主账户SOL余额变化: {}", sol_change);
-            }
+    
+    // 获取池子参数（如果不存在会自动从链上加载）
+    let pool_param = match pool_cache.get_pool_params(&rpc, &Pubkey::from_str(pool_address)?) {
+        Ok(params) => params,
+        Err(e) => {
+            warn!("获取池子参数失败: {}", e);
+            return Ok(None);
         }
-    }
-    let wsol_change = if found_wsol {
-        if wsol_pre > wsol_post { wsol_pre - wsol_post } else { wsol_post - wsol_pre }
-    } else {
-        sol_change
     };
-    // 判断买入还是卖出
-    let trade_direction = if wsol_pre > wsol_post {
-        TradeDirection::Buy
-    } else {
-        TradeDirection::Sell
-    };
-
-    // 2. 解析目标代币的余额变化
-    let wsol_mint = WSOL_MINT;
-    let mut max_in_token = None;
-    let mut max_out_token = None;
-    let mut max_in_amount = 0u64;
-    let mut max_out_amount = 0u64;
-    for (pre, post) in pre_token_balances.iter().zip(post_token_balances.iter()) {
-        let mint = pre.get("mint").and_then(|m| m.as_str()).unwrap_or("");
-        let owner = pre.get("owner").and_then(|o| o.as_str()).unwrap_or("");
-        if owner == user_wallet.to_string() {
-            let pre_amt = pre.get("uiTokenAmount").and_then(|ui| ui.get("amount")).and_then(|a| a.as_str()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            let post_amt = post.get("uiTokenAmount").and_then(|ui| ui.get("amount")).and_then(|a| a.as_str()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            if pre_amt > post_amt {
-                let diff = pre_amt - post_amt;
-                if diff > max_in_amount {
-                    max_in_amount = diff;
-                    max_in_token = Some(mint.to_string());
-                }
-            } else if post_amt > pre_amt {
-                let diff = post_amt - pre_amt;
-                if diff > max_out_amount {
-                    max_out_amount = diff;
-                    max_out_token = Some(mint.to_string());
-                }
-            }
-        }
-    }
-    // 判断方向
-    let trade_direction = if let Some(ref in_token) = max_in_token {
-        if in_token == wsol_mint {
-            TradeDirection::Buy
-        } else {
-            TradeDirection::Sell
-        }
-    } else {
-        TradeDirection::Sell
-    };
-    // token_in/token_out/amount_in/amount_out始终按最大减少/最大增加token
-    let token_in_mint = max_in_token.clone().unwrap_or_else(|| "So11111111111111111111111111111111111111112".to_string());
-    let token_out_mint = max_out_token.clone().unwrap_or_else(|| "So11111111111111111111111111111111111111112".to_string());
-    let amount_in = max_in_amount;
-    let amount_out = max_out_amount;
-
-    // 3. 构造TradeDetails
+    
+    // 分析代币余额变化来确定交易方向和实际金额
+    let (trade_direction, token_in_info, token_out_info, actual_amount_in, actual_amount_out) = 
+        analyze_token_changes_cpmm(
+            pre_token_balances,
+            post_token_balances,
+            account_keys,
+            &pool_param.input_mint,
+            &pool_param.output_mint,
+        )?;
+    
     // 计算价格
-    let price = calculate_price(
-        amount_in,
-        amount_out,
-        &TokenInfo {
-            mint: Pubkey::from_str(&token_in_mint)?,
-            symbol: get_token_symbol(&token_in_mint),
-            decimals: get_token_decimals(&token_in_mint),
-        },
-        &TokenInfo {
-            mint: Pubkey::from_str(&token_out_mint)?,
-            symbol: get_token_symbol(&token_out_mint),
-            decimals: get_token_decimals(&token_out_mint),
-        },
-        &trade_direction,
-    )?;
-    // 计算gas费
-    let gas_fee = calculate_gas_fee(pre_balances, post_balances, account_keys)?;
+    let price = if actual_amount_out > 0 {
+        actual_amount_in as f64 / actual_amount_out as f64
+    } else {
+        0.0
+    };
+    
+    // 获取用户钱包地址
+    let user_wallet = Pubkey::from_str(&account_keys[0])
+        .context("无法解析用户钱包地址")?;
+    
+    // 计算gas费用
+    let gas_fee = calculate_gas_fee(pre_balances, post_balances)?;
+    
+    // 获取程序ID
+    let program_id = Pubkey::from_str("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")?;
+    
     let trade_details = TradeDetails {
         signature: signature.to_string(),
         wallet: user_wallet,
         dex_type: DexType::RaydiumCPMM,
         trade_direction,
-        token_in: TokenInfo {
-            mint: Pubkey::from_str(&token_in_mint)?,
-            symbol: get_token_symbol(&token_in_mint),
-            decimals: get_token_decimals(&token_in_mint),
-        },
-        token_out: TokenInfo {
-            mint: Pubkey::from_str(&token_out_mint)?,
-            symbol: get_token_symbol(&token_out_mint),
-            decimals: get_token_decimals(&token_out_mint),
-        },
-        amount_in,
-        amount_out,
+        token_in: token_in_info,
+        token_out: token_out_info,
+        amount_in: actual_amount_in,
+        amount_out: actual_amount_out,
         price,
-        pool_address: Pubkey::from_str(pool_address)? ,
+        pool_address: Pubkey::from_str(pool_address)?,
         timestamp: Utc::now().timestamp(),
         gas_fee,
-        program_id: Pubkey::from_str(&program_id)?,
+        program_id: program_id,
     };
     
     Ok(Some(trade_details))
@@ -466,28 +397,88 @@ fn extract_token_amount(balance: &serde_json::Value) -> Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("无法提取代币数量"))
 }
 
-/// 计算总gas费（包括网络费和0slot小费）
-fn calculate_gas_fee(
-    pre_balances: &[u64],
-    post_balances: &[u64],
+/// 分析CPMM代币余额变化
+fn analyze_token_changes_cpmm(
+    pre_token_balances: &[serde_json::Value],
+    post_token_balances: &[serde_json::Value],
     account_keys: &[String],
-) -> Result<u64> {
-    let mut total_fee = 5000u64; // 基础网络费
+    input_mint: &Pubkey,
+    output_mint: &Pubkey,
+) -> Result<(TradeDirection, TokenInfo, TokenInfo, u64, u64)> {
+    let user_wallet = &account_keys[0];
     
-    // 查找0slot账户
-    for (i, account) in account_keys.iter().enumerate() {
-        if account.contains("0slot") || account.contains("tip") {
-            if i < pre_balances.len() && i < post_balances.len() {
-                let tip = post_balances[i].saturating_sub(pre_balances[i]);
-                if tip > 0 {
-                    info!("检测到0slot小费: {} lamports ({:.6} SOL)", tip, tip as f64 / 1e9);
-                    total_fee += tip;
+    // 查找用户钱包的代币余额变化
+    let mut max_in_token = None;
+    let mut max_out_token = None;
+    let mut max_in_amount = 0u64;
+    let mut max_out_amount = 0u64;
+    let mut max_in_decimals = 6u8;
+    let mut max_out_decimals = 6u8;
+    
+    for (pre, post) in pre_token_balances.iter().zip(post_token_balances.iter()) {
+        let mint = pre.get("mint").and_then(|m| m.as_str()).unwrap_or("");
+        let owner = pre.get("owner").and_then(|o| o.as_str()).unwrap_or("");
+        let decimals = pre.get("uiTokenAmount").and_then(|ui| ui.get("decimals")).and_then(|d| d.as_u64()).unwrap_or(6) as u8;
+        
+        if owner == user_wallet {
+            let pre_amt = pre.get("uiTokenAmount").and_then(|ui| ui.get("amount")).and_then(|a| a.as_str()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let post_amt = post.get("uiTokenAmount").and_then(|ui| ui.get("amount")).and_then(|a| a.as_str()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            
+            if pre_amt > post_amt {
+                let diff = pre_amt - post_amt;
+                if diff > max_in_amount {
+                    max_in_amount = diff;
+                    max_in_token = Some(mint.to_string());
+                    max_in_decimals = decimals;
+                }
+            } else if post_amt > pre_amt {
+                let diff = post_amt - pre_amt;
+                if diff > max_out_amount {
+                    max_out_amount = diff;
+                    max_out_token = Some(mint.to_string());
+                    max_out_decimals = decimals;
                 }
             }
         }
     }
     
-    Ok(total_fee)
+    // 确定交易方向
+    let trade_direction = if max_in_token.as_ref() == Some(&WSOL_MINT.to_string()) {
+        TradeDirection::Buy
+    } else {
+        TradeDirection::Sell
+    };
+    
+    // 构造TokenInfo
+    let token_in_str = max_in_token.as_ref().map(|s| s.as_str()).unwrap_or(WSOL_MINT);
+    let token_out_str = max_out_token.as_ref().map(|s| s.as_str()).unwrap_or(WSOL_MINT);
+    let token_in_info = TokenInfo {
+        mint: Pubkey::from_str(token_in_str)?,
+        symbol: get_token_symbol(token_in_str),
+        decimals: max_in_decimals,
+    };
+    let token_out_info = TokenInfo {
+        mint: Pubkey::from_str(token_out_str)?,
+        symbol: get_token_symbol(token_out_str),
+        decimals: max_out_decimals,
+    };
+    Ok((trade_direction, token_in_info, token_out_info, max_in_amount, max_out_amount))
+}
+
+/// 计算gas费用
+fn calculate_gas_fee(pre_balances: &[u64], post_balances: &[u64]) -> Result<u64> {
+    if pre_balances.is_empty() || post_balances.is_empty() {
+        return Ok(0);
+    }
+    
+    let pre_sol = pre_balances[0];
+    let post_sol = post_balances[0];
+    
+    if pre_sol > post_sol {
+        Ok(pre_sol - post_sol)
+    } else {
+        Ok(0)
+    }
 }
 
 /// 计算价格

@@ -1,11 +1,12 @@
 use anyhow::{Result, Context};
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
 use crate::types::{TradeDetails, DexType, TradeDirection, TokenInfo, WSOL_MINT, PUMP_BUY_INSTRUCTION, PUMP_SELL_INSTRUCTION};
 // use crate::parser;
 use chrono::Utc;
-use wallet_copier::pool_loader::PoolLoader;
+use crate::pool_cache::PoolCache;
+use solana_client::rpc_client::RpcClient;
 
 /// Pump.fun Buy指令的账户布局
 /// 0: Pump Program
@@ -37,6 +38,10 @@ pub fn parse_pump_trade(
     
     // 判断交易类型
     let instruction_type = instruction_data[0];
+    if instruction_type != PUMP_BUY_INSTRUCTION && instruction_type != PUMP_SELL_INSTRUCTION {
+        warn!("[Pump识别] 未知Pump指令类型: {}，account_keys={:?}", instruction_type, account_keys);
+        return Ok(None);
+    }
     let trade_direction = match instruction_type {
         PUMP_BUY_INSTRUCTION => TradeDirection::Buy,
         PUMP_SELL_INSTRUCTION => TradeDirection::Sell,
@@ -112,9 +117,10 @@ pub fn parse_pump_trade(
     let user_index = account_keys.iter().position(|k| k == user_address).unwrap_or(0);
     let gas_fee = calculate_gas_fee(pre_balances, post_balances, user_index);
     
-    let loader = PoolLoader::load();
-    let pool_param = loader.find_pump_by_mint(mint_address);
-    let program_id = pool_param.and_then(|p| p.program_id.clone()).unwrap_or(crate::types::PUMP_FUN_PROGRAM.to_string());
+    let pool_cache = crate::pool_cache::PoolCache::new(300);
+    let rpc = RpcClient::new("https://solana-rpc.publicnode.com/f884f7c2cfa0e7ecbf30e7da70ec1da91bda3c9d04058269397a5591e7fd013e".to_string());
+    let pool_param = pool_cache.get_pool_params(&rpc, &Pubkey::from_str(mint_address).unwrap());
+    let program_id = pool_param.map(|p| p.authority.clone()).unwrap_or(Pubkey::from_str(crate::types::PUMP_FUN_PROGRAM).unwrap());
     let trade_details = TradeDetails {
         signature: signature.to_string(),
         wallet: user_wallet,
@@ -128,7 +134,7 @@ pub fn parse_pump_trade(
         pool_address: Pubkey::from_str(bonding_curve)?,
         timestamp: Utc::now().timestamp(),
         gas_fee,
-        program_id: Pubkey::from_str(&program_id)?,
+        program_id: program_id,
     };
     
     info!("成功解析Pump.fun交易:");

@@ -98,6 +98,7 @@ impl TransactionParser {
             if account == RAYDIUM_AMM_V4 {
                 return Ok(DexType::RaydiumAmmV4);
             } else if account == PUMP_FUN_PROGRAM {
+                tracing::info!("[Pump识别] 识别到PumpFun交易: account_keys={:?}", account_keys);
                 return Ok(DexType::PumpFun);
             } else if account == RAYDIUM_CPMM {
                 return Ok(DexType::RaydiumCPMM);

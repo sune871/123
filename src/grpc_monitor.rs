@@ -429,35 +429,40 @@ impl GrpcMonitor {
                 let executor = Arc::clone(executor);
                 match trade.dex_type {
                     crate::types::DexType::RaydiumCPMM => {
-                        // 以链上TX顺序组装cpmm_accounts和extra_accounts
+                        // 使用PoolCache动态获取池子参数
                         if account_keys.len() >= 16 {
                             info!("[DEBUG] Raydium CPMM分支，account_keys数量: {}", account_keys.len());
-                            // 用跟单钱包作为payer和ATA
-                            let cpmm_accounts = RaydiumCpmmSwapAccounts {
-                                payer: executor.copy_wallet.pubkey(),
-                                user_input_ata: get_associated_token_address(&executor.copy_wallet.pubkey(), &trade.token_in.mint),
-                                user_output_ata: get_associated_token_address(&executor.copy_wallet.pubkey(), &trade.token_out.mint),
-                                pool_state: Pubkey::from_str(&account_keys[3]).unwrap(),
-                                authority: Pubkey::from_str(&account_keys[4]).unwrap(),
-                                amm_config: Pubkey::from_str(&account_keys[5]).unwrap(),
-                                observation_state: Pubkey::from_str(&account_keys[6]).unwrap(),
-                                input_vault: Pubkey::from_str(&account_keys[7]).unwrap(),
-                                output_vault: Pubkey::from_str(&account_keys[8]).unwrap(),
-                                input_token_program: Pubkey::from_str(&account_keys[9]).unwrap(),
-                                output_token_program: Pubkey::from_str(&account_keys[10]).unwrap(),
-                                input_mint: Pubkey::from_str(&account_keys[11]).unwrap(),
-                                output_mint: Pubkey::from_str(&account_keys[12]).unwrap(),
-                            };
-                            let extra_accounts = account_keys[13..].iter().map(|k| Pubkey::from_str(k).unwrap()).collect::<Vec<_>>();
-                            let min_amount_out = (trade.amount_out as f64 * (1.0 - executor.config.slippage_tolerance)) as u64;
+                            
+                            let pool_state = Pubkey::from_str(&account_keys[3]).unwrap();
+                            let rpc_url = executor.rpc_url.clone();
                             let trade_clone = trade.clone();
-                            let cpmm_accounts_clone = cpmm_accounts.clone();
-                            let extra_accounts_clone = extra_accounts.clone();
                             let executor = Arc::clone(&executor);
                             let wallet = executor.copy_wallet.clone();
-                            let rpc_url = executor.rpc_url.clone();
+                            
                             tokio::spawn(async move {
                                 let client = solana_client::rpc_client::RpcClient::new(rpc_url);
+                                let pool_cache = crate::pool_cache::PoolCache::new(300);
+                                
+                                // 从文件加载现有池子
+                                if let Err(e) = pool_cache.load_from_file() {
+                                    warn!("加载池子文件失败: {}", e);
+                                }
+                                
+                                // 动态获取池子参数
+                                let cpmm_accounts = match pool_cache.build_swap_accounts(
+                                    &client,
+                                    &pool_state,
+                                    &wallet.pubkey(),
+                                    &trade_clone.token_in.mint,
+                                    &trade_clone.token_out.mint
+                                ) {
+                                    Ok(accounts) => accounts,
+                                    Err(e) => {
+                                        error!("构建CPMM账户失败: {}", e);
+                                        return;
+                                    }
+                                };
+                                
                                 info!("[DEBUG] tokio::spawn内，先同步创建ATA");
                                 if let Err(e) = TradeExecutor::ensure_ata_exists_static(&client, &wallet, &wallet.pubkey(), &trade_clone.token_in.mint) {
                                     warn!("[ATA] 创建token_in ATA失败: {}", e);
@@ -467,6 +472,7 @@ impl GrpcMonitor {
                                     warn!("[ATA] 创建token_out ATA失败: {}", e);
                                     return;
                                 }
+                                
                                 // 卖出前检查余额
                                 if trade_clone.trade_direction == crate::types::TradeDirection::Sell {
                                     let token_mint = trade_clone.token_in.mint;
@@ -479,10 +485,13 @@ impl GrpcMonitor {
                                         return;
                                     }
                                 }
+                                
                                 info!("[DEBUG] ATA已全部创建，开始执行swap跟单");
+                                let min_amount_out = (trade_clone.amount_out as f64 * (1.0 - executor.config.slippage_tolerance)) as u64;
+                                
                                 // Raydium CPMM分支，extra_accounts传空slice
                                 let res = TradeExecutor::execute_raydium_cpmm_trade_static(
-                                    &client, &wallet, &trade_clone, &cpmm_accounts_clone, &[], min_amount_out,
+                                    &client, &wallet, &trade_clone, &cpmm_accounts, &[], min_amount_out,
                                     None, None, None, None, None
                                 ).await;
                                 info!("[DEBUG] 跟单执行结果: {:?}", res);
@@ -745,113 +754,40 @@ impl GrpcMonitor {
                 let executor = Arc::clone(executor);
                 match trade.dex_type {
                     crate::types::DexType::RaydiumCPMM => {
+                        // 使用PoolCache动态获取池子参数
                         if account_keys.len() >= 16 {
-                            let cpmm_accounts = RaydiumCpmmSwapAccounts {
-                                payer: executor.copy_wallet.pubkey(),
-                                authority: Pubkey::from_str("GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL").unwrap(),
-                                amm_config: Pubkey::from_str("D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2").unwrap(),
-                                pool_state: Pubkey::from_str(&account_keys[5]).unwrap(),
-                                user_input_ata: get_associated_token_address(&executor.copy_wallet.pubkey(), &trade.token_in.mint),
-                                user_output_ata: get_associated_token_address(&executor.copy_wallet.pubkey(), &trade.token_out.mint),
-                                input_vault: Pubkey::from_str(&account_keys[8]).unwrap(),
-                                output_vault: Pubkey::from_str(&account_keys[9]).unwrap(),
-                                input_token_program: Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap(),
-                                output_token_program: Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap(),
-                                input_mint: Pubkey::from_str(&account_keys[10]).unwrap(),
-                                output_mint: Pubkey::from_str(&account_keys[11]).unwrap(),
-                                observation_state: Pubkey::from_str(&account_keys[12]).unwrap(),
-                            };
-                            let extra_accounts = account_keys[13..].iter().map(|k| Pubkey::from_str(k).unwrap()).collect::<Vec<_>>();
-                            let min_amount_out = 0; // 强制设为0，排除滑点导致的失败
-                            // 强制修正is_signer，只允许payer为true，其它全为false
-                            let mut fixed_is_signer = is_signer.clone();
-                            for i in 1..fixed_is_signer.len() {
-                                fixed_is_signer[i] = false;
-                            }
-                            // 按Raydium CPMM标准顺序组装账户
-                            let mut swap_account_keys = Vec::new();
-                            let mut swap_is_signer = Vec::new();
-                            let mut swap_is_writable = Vec::new();
-
-                            // 0. payer (你的钱包)
-                            swap_account_keys.push(executor.copy_wallet.pubkey().to_string());
-                            swap_is_signer.push(true);
-                            swap_is_writable.push(true);
-
-                            // 1. authority (链上池子参数)
-                            swap_account_keys.push("GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL".to_string());
-                            swap_is_signer.push(false);
-                            swap_is_writable.push(false);
-
-                            // 2. amm_config (链上池子参数)
-                            swap_account_keys.push("D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2".to_string());
-                            swap_is_signer.push(false);
-                            swap_is_writable.push(false);
-
-                            // 3. pool_state (链上池子参数)
-                            swap_account_keys.push(account_keys[5].clone()); // 用你之前确定的account_keys[5]
-                            swap_is_signer.push(false);
-                            swap_is_writable.push(true);
-
-                            // 4. user_input_ata (你的input ATA)
-                            swap_account_keys.push(get_associated_token_address(&executor.copy_wallet.pubkey(), &trade.token_in.mint).to_string());
-                            swap_is_signer.push(false);
-                            swap_is_writable.push(true);
-
-                            // 5. user_output_ata (你的output ATA)
-                            swap_account_keys.push(get_associated_token_address(&executor.copy_wallet.pubkey(), &trade.token_out.mint).to_string());
-                            swap_is_signer.push(false);
-                            swap_is_writable.push(true);
-
-                            // 6. input_vault (链上池子参数)
-                            swap_account_keys.push(account_keys[8].clone()); // 用你之前确定的account_keys[8]
-                            swap_is_signer.push(false);
-                            swap_is_writable.push(true);
-
-                            // 7. output_vault (链上池子参数)
-                            swap_account_keys.push(account_keys[9].clone()); // 用你之前确定的account_keys[9]
-                            swap_is_signer.push(false);
-                            swap_is_writable.push(true);
-
-                            // 8. input_token_program (SPL Token Program)
-                            swap_account_keys.push("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string());
-                            swap_is_signer.push(false);
-                            swap_is_writable.push(false);
-
-                            // 9. output_token_program (SPL Token Program)
-                            swap_account_keys.push("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string());
-                            swap_is_signer.push(false);
-                            swap_is_writable.push(false);
-
-                            // 10. input_mint (链上池子参数)
-                            swap_account_keys.push(account_keys[10].clone());
-                            swap_is_signer.push(false);
-                            swap_is_writable.push(false);
-
-                            // 11. output_mint (链上池子参数)
-                            swap_account_keys.push(account_keys[11].clone());
-                            swap_is_signer.push(false);
-                            swap_is_writable.push(false);
-
-                            // 12. observation_state (链上池子参数)
-                            swap_account_keys.push(account_keys[12].clone());
-                            swap_is_signer.push(false);
-                            swap_is_writable.push(true);
-
-                            // swap前打印账户权限
-                            // info!("[权限对照] swap指令账户权限:");
-                            // for (i, ((addr, signer), writable)) in swap_account_keys.iter().zip(swap_is_signer.iter()).zip(swap_is_writable.iter()).enumerate() {
-                            //     info!("  [{}] {} signer:{} writable:{}", i, addr, signer, writable);
-                            // }
-                            let mut trade_clone = trade.clone();
-                            trade_clone.amount_in = (0.001 * 1_000_000_000.0) as u64; // 强制下单0.001 SOL
-                            let cpmm_accounts_clone = cpmm_accounts.clone();
-                            let extra_accounts_clone = extra_accounts.clone();
+                            info!("[DEBUG] Raydium CPMM分支，account_keys数量: {}", account_keys.len());
+                            
+                            let pool_state = Pubkey::from_str(&account_keys[3]).unwrap();
+                            let rpc_url = executor.rpc_url.clone();
+                            let trade_clone = trade.clone();
                             let executor = Arc::clone(&executor);
                             let wallet = executor.copy_wallet.clone();
-                            let rpc_url = executor.rpc_url.clone();
+                            
                             tokio::spawn(async move {
                                 let client = solana_client::rpc_client::RpcClient::new(rpc_url);
+                                let pool_cache = crate::pool_cache::PoolCache::new(300);
+                                
+                                // 从文件加载现有池子
+                                if let Err(e) = pool_cache.load_from_file() {
+                                    warn!("加载池子文件失败: {}", e);
+                                }
+                                
+                                // 动态获取池子参数
+                                let cpmm_accounts = match pool_cache.build_swap_accounts(
+                                    &client,
+                                    &pool_state,
+                                    &wallet.pubkey(),
+                                    &trade_clone.token_in.mint,
+                                    &trade_clone.token_out.mint
+                                ) {
+                                    Ok(accounts) => accounts,
+                                    Err(e) => {
+                                        error!("构建CPMM账户失败: {}", e);
+                                        return;
+                                    }
+                                };
+                                
                                 info!("[DEBUG] tokio::spawn内，先同步创建ATA");
                                 if let Err(e) = TradeExecutor::ensure_ata_exists_static(&client, &wallet, &wallet.pubkey(), &trade_clone.token_in.mint) {
                                     warn!("[ATA] 创建token_in ATA失败: {}", e);
@@ -861,18 +797,32 @@ impl GrpcMonitor {
                                     warn!("[ATA] 创建token_out ATA失败: {}", e);
                                     return;
                                 }
-                                // 卖出方向直接跳过，只测试买入
+                                
+                                // 卖出前检查余额
                                 if trade_clone.trade_direction == crate::types::TradeDirection::Sell {
-                                    info!("[风控] 仅测试买入，卖出方向自动跳过");
-                                    return;
+                                    let token_mint = trade_clone.token_in.mint;
+                                    let ata = get_associated_token_address(&wallet.pubkey(), &token_mint);
+                                    let balance = client.get_token_account_balance(&ata)
+                                        .map(|b| b.amount.parse::<u64>().unwrap_or(0))
+                                        .unwrap_or(0);
+                                    if balance < trade_clone.amount_in {
+                                        warn!("[风控] 跟单钱包无足够{}余额，跳过卖出。余额: {}，需卖出: {}", trade_clone.token_in.symbol.as_ref().unwrap_or(&"目标币种".to_string()), balance, trade_clone.amount_in);
+                                        return;
+                                    }
                                 }
+                                
                                 info!("[DEBUG] ATA已全部创建，开始执行swap跟单");
+                                let min_amount_out = (trade_clone.amount_out as f64 * (1.0 - executor.config.slippage_tolerance)) as u64;
+                                
+                                // Raydium CPMM分支，extra_accounts传空slice
                                 let res = TradeExecutor::execute_raydium_cpmm_trade_static(
-                                    &client, &wallet, &trade_clone, &cpmm_accounts_clone, &[], min_amount_out,
-                                    Some(&swap_account_keys), Some(&swap_is_signer), Some(&swap_is_writable), Some(instruction_data.clone()), Some(&program_id)
+                                    &client, &wallet, &trade_clone, &cpmm_accounts, &[], min_amount_out,
+                                    None, None, None, None, None
                                 ).await;
                                 info!("[DEBUG] 跟单执行结果: {:?}", res);
                             });
+                        } else {
+                            warn!("[DEBUG] Raydium CPMM分支，account_keys数量不足，跳过跟单，当前keys: {:?}", account_keys);
                         }
                     }
                     _ => {
